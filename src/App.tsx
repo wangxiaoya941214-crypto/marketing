@@ -23,7 +23,6 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import ReactMarkdown from "react-markdown";
 import {
   PRODUCT_META,
   PRODUCT_ORDER,
@@ -1046,62 +1045,6 @@ export default function App() {
               </Card>
             </div>
 
-            <div className="grid grid-cols-1 xl:grid-cols-[0.95fr_1.05fr] gap-8">
-              <Card className="p-8">
-                <h2 className="text-2xl font-black mb-6">内容效率排名</h2>
-                <div className="space-y-4">
-                  {result.dashboard.contentRanking.length ? (
-                    result.dashboard.contentRanking.map((item) => (
-                      <div key={`${item.rank}-${item.name}`} className="rounded-3xl border border-gray-100 p-5">
-                        <div className="flex items-center justify-between gap-4">
-                          <div>
-                            <p className="text-lg font-black text-black">
-                              {item.medal} {item.rank}. {item.name}
-                            </p>
-                            <p className="text-[10px] font-black uppercase tracking-[0.14em] text-gray-400">{item.product}</p>
-                          </div>
-                          <span className={`inline-flex rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-widest ${item.recommendation === "立刻加量" ? "bg-[#08E03B]/10 text-[#067b21]" : item.recommendation === "建议暂停" ? "bg-red-50 text-red-700" : "bg-yellow-50 text-yellow-700"}`}>
-                            {item.recommendation}
-                          </span>
-                        </div>
-                        <div className="mt-4 grid grid-cols-3 gap-3">
-                          <div className="rounded-2xl bg-gray-50 px-3 py-3 text-sm font-bold text-gray-600">留资 {formatCount(item.leads, "条")}</div>
-                          <div className="rounded-2xl bg-gray-50 px-3 py-3 text-sm font-bold text-gray-600">占比 {formatRate(item.leadShare)}</div>
-                          <div className="rounded-2xl bg-gray-50 px-3 py-3 text-sm font-bold text-gray-600">CPL {formatMoney(item.cpl)}</div>
-                        </div>
-                        <p className="mt-4 text-sm font-medium leading-6 text-gray-600">{item.reason}</p>
-                      </div>
-                    ))
-                  ) : (
-                    <div className="rounded-3xl border border-gray-100 p-5 text-sm font-medium text-gray-500">当前没有足够的内容数据可排名。</div>
-                  )}
-                </div>
-              </Card>
-
-              <Card className="p-8 prose prose-slate prose-lg max-w-none shadow-2xl overflow-hidden relative">
-                <div className="absolute top-0 right-0 p-8 opacity-5 pointer-events-none">
-                  <span className="text-8xl font-black italic uppercase">REPORT</span>
-                </div>
-                <ReactMarkdown
-                  components={{
-                    h1: ({ ...props }) => <h1 className="text-4xl font-black italic uppercase tracking-tighter mb-10 border-b-4 border-black pb-6 inline-block" {...props} />,
-                    h2: ({ ...props }) => <h2 className="text-2xl font-black uppercase tracking-tight mt-16 mb-8 flex items-center gap-4 text-black border-l-4 border-[#08E03B] pl-4" {...props} />,
-                    table: ({ ...props }) => (
-                      <div className="overflow-x-auto my-10 rounded-2xl border-2 border-black">
-                        <table className="w-full text-left text-sm" {...props} />
-                      </div>
-                    ),
-                    thead: ({ ...props }) => <thead className="bg-black text-[#08E03B] uppercase font-black tracking-widest text-[10px]" {...props} />,
-                    th: ({ ...props }) => <th className="px-6 py-5" {...props} />,
-                    td: ({ ...props }) => <td className="px-6 py-5 border-t border-gray-100 font-bold" {...props} />,
-                    li: ({ ...props }) => <li className="mb-6 list-none pl-8 relative before:content-[''] before:absolute before:left-0 before:top-2 before:w-4 before:h-4 before:bg-[#08E03B] before:rounded-sm" {...props} />,
-                    p: ({ ...props }) => <p className="leading-relaxed text-gray-600 font-medium" {...props} />,
-                  }}
-                >
-                  {result.analysis}
-                </ReactMarkdown>
-              </Card>
-            </div>
           </div>
         )}
       </main>

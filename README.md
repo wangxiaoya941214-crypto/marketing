@@ -4,7 +4,7 @@
 
 # SUPEREV 营销分析助手
 
-这是一个可在本地运行的 `Vite + React + Express + Gemini/OpenAI` 分析工具。
+这是一个可在本地运行的 `Vite + React + Express + OpenAI / Gemini / SiliconFlow` 分析工具。
 现在的页面流程是：
 
 1. 首页继续保留“上传 / 粘贴数据”的主入口
@@ -17,27 +17,48 @@
 
 1. 安装依赖
    `npm install`
-2. 新建 `.env.local` 并配置至少一个密钥
+2. 新建 `.env.local`
+3. 本地如果希望优先走 OpenAI / gpt-5.4，配置：
+   `OPENAI_API_KEY=你的 OpenAI Key`
+   `OPENAI_MODEL=gpt-5.4`
+4. 可选：补一个 Gemini 作为图片 / PDF 识别备用：
    `GEMINI_API_KEY=你的 Gemini Key`
-   或者
-   `SILICONFLOW_API_KEY=你的 SiliconFlow Key`
-3. 可选：指定 Gemini 模型
    `GEMINI_MODEL=gemini-2.5-flash`
-4. 可选：指定 SiliconFlow 模型
-   `SILICONFLOW_MODEL=Qwen/Qwen3.5-397B-A17B`
 5. 启动本地服务
    `npm run dev`
 6. 打开浏览器访问
    [http://localhost:3000](http://localhost:3000)
 
+本地默认优先级：
+
+- 最终分析：`OpenAI(gpt-5.4)` -> `Gemini` -> `SiliconFlow`
+- 图片 / PDF 识别：`OpenAI(gpt-5.4)` -> `Gemini`
+
 ## Railway 部署
 
+线上推荐使用 SiliconFlow 接千问 3.5：
+
+- `SILICONFLOW_API_KEY=你的硅基流 key`
+- `SILICONFLOW_MODEL=Qwen/Qwen3.5-397B-A17B`
+- 可选：`SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1`
+
+如果线上也要支持图片 / PDF 智能识别，再额外补一个：
+
+- `OPENAI_API_KEY=你的 OpenAI key`
+或
+- `GEMINI_API_KEY=你的 Gemini key`
+
+线上默认优先级：
+
+- 最终分析：`SiliconFlow(Qwen/Qwen3.5-397B-A17B)` -> `Gemini` -> `OpenAI`
+- 图片 / PDF 识别：`Gemini` -> `OpenAI`
+ 
 这个项目已经适配 Railway：
 
 - 服务端会优先读取 Railway 注入的 `PORT`
 - 生产启动命令使用 `npm start`
 - 构建命令使用 `npm run build`
-- AI Provider 支持 `GEMINI_API_KEY`、`SILICONFLOW_API_KEY`、`OPENAI_API_KEY`
+- AI Provider 支持 `OPENAI_API_KEY`、`GEMINI_API_KEY`、`SILICONFLOW_API_KEY`
 
 如果你通过 GitHub 连接 Railway，常用配置就是：
 

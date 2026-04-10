@@ -18,10 +18,11 @@ import {
 dotenv.config({ path: ".env.local" });
 dotenv.config();
 
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const SILICONFLOW_BASE_URL = process.env.SILICONFLOW_BASE_URL || "https://api.siliconflow.cn/v1";
 const SILICONFLOW_MODEL = process.env.SILICONFLOW_MODEL || "Qwen/Qwen3.5-397B-A17B";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || (IS_PRODUCTION ? "gpt-4.1-mini" : "gpt-5.4");
 
 type UploadedFileInfo = {
   name?: string;
@@ -160,37 +161,7 @@ const safeJsonParse = (text: string) => {
 async function recognizeUploadedFileWithAi(fileInfo: UploadedFileInfo) {
   const mimeType = fileInfo.mimeType || "application/octet-stream";
 
-  if (process.env.GEMINI_API_KEY) {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    const parts: any[] = [{ text: buildRecognitionPrompt() }];
-    parts.push({
-      inlineData: {
-        data: fileInfo.data,
-        mimeType,
-      },
-    });
-
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: { parts },
-      config: {
-        responseMimeType: "application/json",
-      } as any,
-    });
-
-    const text = response.text?.trim();
-    if (!text) {
-      throw new Error("Gemini 没有返回识别结果。");
-    }
-
-    return {
-      patch: safeJsonParse(text) as Partial<MarketingInput>,
-      rawText: text,
-      mode: `AI识别（${GEMINI_MODEL}）`,
-    };
-  }
-
-  if (process.env.OPENAI_API_KEY) {
+  const tryOpenAiRecognition = async () => {
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const response = await openai.chat.completions.create({
       model: OPENAI_MODEL,
@@ -219,6 +190,48 @@ async function recognizeUploadedFileWithAi(fileInfo: UploadedFileInfo) {
       rawText: text,
       mode: `AI识别（${OPENAI_MODEL}）`,
     };
+  };
+
+  const tryGeminiRecognition = async () => {
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const parts: any[] = [{ text: buildRecognitionPrompt() }];
+    parts.push({
+      inlineData: {
+        data: fileInfo.data,
+        mimeType,
+      },
+    });
+
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: { parts },
+      config: {
+        responseMimeType: "application/json",
+      } as any,
+    });
+
+    const text = response.text?.trim();
+    if (!text) {
+      throw new Error("Gemini 没有返回识别结果。");
+    }
+
+    return {
+      patch: safeJsonParse(text) as Partial<MarketingInput>,
+      rawText: text,
+      mode: `AI识别（${GEMINI_MODEL}）`,
+    };
+  };
+
+  if (!IS_PRODUCTION && process.env.OPENAI_API_KEY) {
+    return tryOpenAiRecognition();
+  }
+
+  if (process.env.GEMINI_API_KEY) {
+    return tryGeminiRecognition();
+  }
+
+  if (process.env.OPENAI_API_KEY) {
+    return tryOpenAiRecognition();
   }
 
   throw new Error("图片 / PDF 智能识别目前需要先配置 GEMINI_API_KEY 或 OPENAI_API_KEY。SiliconFlow 当前用于文本分析增强。");
@@ -254,7 +267,23 @@ async function recognizeIntake(body: AnalyzeRequestBody) {
 }
 
 async function generateAiEnhancedReport(prompt: string) {
-  if (process.env.GEMINI_API_KEY) {
+  const tryOpenAiReport = async () => {
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const response = await openai.chat.completions.create({
+      model: OPENAI_MODEL,
+      messages: [{ role: "user", content: prompt }],
+    });
+    const text = response.choices[0]?.message?.content?.trim();
+    if (text && text.includes("模块一") && text.includes("模块六")) {
+      return {
+        mode: `AI增强（${OPENAI_MODEL}）`,
+        report: text,
+      };
+    }
+    throw new Error("OpenAI 返回内容不完整。");
+  };
+
+  const tryGeminiReport = async () => {
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     const response = await ai.models.generateContent({
       model: GEMINI_MODEL,
@@ -268,9 +297,9 @@ async function generateAiEnhancedReport(prompt: string) {
       };
     }
     throw new Error("Gemini 返回内容不完整。");
-  }
+  };
 
-  if (process.env.SILICONFLOW_API_KEY) {
+  const trySiliconFlowReport = async () => {
     const siliconflow = new OpenAI({
       apiKey: process.env.SILICONFLOW_API_KEY,
       baseURL: SILICONFLOW_BASE_URL,
@@ -288,22 +317,26 @@ async function generateAiEnhancedReport(prompt: string) {
       };
     }
     throw new Error("SiliconFlow 返回内容不完整。");
+  };
+
+  if (!IS_PRODUCTION && process.env.OPENAI_API_KEY) {
+    return tryOpenAiReport();
+  }
+
+  if (IS_PRODUCTION && process.env.SILICONFLOW_API_KEY) {
+    return trySiliconFlowReport();
+  }
+
+  if (process.env.GEMINI_API_KEY) {
+    return tryGeminiReport();
+  }
+
+  if (process.env.SILICONFLOW_API_KEY) {
+    return trySiliconFlowReport();
   }
 
   if (process.env.OPENAI_API_KEY) {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const response = await openai.chat.completions.create({
-      model: OPENAI_MODEL,
-      messages: [{ role: "user", content: prompt }],
-    });
-    const text = response.choices[0]?.message?.content?.trim();
-    if (text && text.includes("模块一") && text.includes("模块六")) {
-      return {
-        mode: `AI增强（${OPENAI_MODEL}）`,
-        report: text,
-      };
-    }
-    throw new Error("OpenAI 返回内容不完整。");
+    return tryOpenAiReport();
   }
 
   return null;
