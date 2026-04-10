@@ -19,11 +19,15 @@
    `npm install`
 2. 新建 `.env.local` 并配置至少一个密钥
    `GEMINI_API_KEY=你的 Gemini Key`
+   或者
+   `SILICONFLOW_API_KEY=你的 SiliconFlow Key`
 3. 可选：指定 Gemini 模型
    `GEMINI_MODEL=gemini-2.5-flash`
-4. 启动本地服务
+4. 可选：指定 SiliconFlow 模型
+   `SILICONFLOW_MODEL=Qwen/Qwen3.5-397B-A17B`
+5. 启动本地服务
    `npm run dev`
-5. 打开浏览器访问
+6. 打开浏览器访问
    [http://localhost:3000](http://localhost:3000)
 
 ## Railway 部署
@@ -33,11 +37,16 @@
 - 服务端会优先读取 Railway 注入的 `PORT`
 - 生产启动命令使用 `npm start`
 - 构建命令使用 `npm run build`
+- AI Provider 支持 `GEMINI_API_KEY`、`SILICONFLOW_API_KEY`、`OPENAI_API_KEY`
 
 如果你通过 GitHub 连接 Railway，常用配置就是：
 
 - Build Command: `npm run build`
 - Start Command: `npm start`
+- Variables:
+  - `SILICONFLOW_API_KEY=你的硅基流 key`
+  - `SILICONFLOW_MODEL=Qwen/Qwen3.5-397B-A17B`
+  - 可选：`SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1`
 
 ## 当前支持的输入
 

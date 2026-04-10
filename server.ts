@@ -19,6 +19,8 @@ dotenv.config({ path: ".env.local" });
 dotenv.config();
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const SILICONFLOW_BASE_URL = process.env.SILICONFLOW_BASE_URL || "https://api.siliconflow.cn/v1";
+const SILICONFLOW_MODEL = process.env.SILICONFLOW_MODEL || "Qwen/Qwen3.5-397B-A17B";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
 type UploadedFileInfo = {
@@ -219,7 +221,7 @@ async function recognizeUploadedFileWithAi(fileInfo: UploadedFileInfo) {
     };
   }
 
-  throw new Error("图片 / PDF 智能识别需要先配置 GEMINI_API_KEY 或 OPENAI_API_KEY。");
+  throw new Error("图片 / PDF 智能识别目前需要先配置 GEMINI_API_KEY 或 OPENAI_API_KEY。SiliconFlow 当前用于文本分析增强。");
 }
 
 async function recognizeIntake(body: AnalyzeRequestBody) {
@@ -266,6 +268,26 @@ async function generateAiEnhancedReport(prompt: string) {
       };
     }
     throw new Error("Gemini 返回内容不完整。");
+  }
+
+  if (process.env.SILICONFLOW_API_KEY) {
+    const siliconflow = new OpenAI({
+      apiKey: process.env.SILICONFLOW_API_KEY,
+      baseURL: SILICONFLOW_BASE_URL,
+    });
+    const response = await siliconflow.chat.completions.create({
+      model: SILICONFLOW_MODEL,
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
+    });
+    const text = response.choices[0]?.message?.content?.trim();
+    if (text && text.includes("模块一") && text.includes("模块六")) {
+      return {
+        mode: `AI增强（${SILICONFLOW_MODEL} @ SiliconFlow）`,
+        report: text,
+      };
+    }
+    throw new Error("SiliconFlow 返回内容不完整。");
   }
 
   if (process.env.OPENAI_API_KEY) {
