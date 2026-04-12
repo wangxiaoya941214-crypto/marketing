@@ -35,12 +35,33 @@ import {
   type MarketingDashboardData,
   type MarketingInput,
 } from "../shared/marketing-engine";
+import {
+  ActionPlanSection,
+  AnalysisReportSection,
+  BudgetRecommendationsSection,
+  ContentRankingSection,
+  ReliabilitySection,
+  ResultModuleNavigation,
+  ScalePlanSection,
+} from "./components/result-modules";
+import {
+  MoMOverviewSection,
+  PreviousMetricsSection,
+} from "./components/previous-period";
+import { LeadImportAuditPanel } from "./components/lead-import-audit";
+import type { LeadSheetAdapterSidecar } from "../shared/adapters/lead-sheet/build-marketing-input-from-leads";
 
 type ResultPayload = {
   analysis: string;
   dashboard: MarketingDashboardData;
   normalizedInput: MarketingInput;
   engineMode: string;
+};
+
+type RecognitionPayload = {
+  recognizedInput?: MarketingInput;
+  recognitionMode?: string;
+  importAudit?: LeadSheetAdapterSidecar | null;
 };
 
 type Screen = "home" | "matching" | "result";
@@ -288,6 +309,7 @@ export default function App() {
   const [recognitionMessage, setRecognitionMessage] = useState("");
   const [result, setResult] = useState<ResultPayload | null>(null);
   const [engineMode, setEngineMode] = useState("");
+  const [leadImportAudit, setLeadImportAudit] = useState<LeadSheetAdapterSidecar | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const audit = auditMarketingInput({
@@ -352,11 +374,24 @@ export default function App() {
     });
   };
 
+  const setPreviousValue = (patch: Partial<MarketingInput["previous"]>) => {
+    setForm((current) => ({
+      ...current,
+      previous: {
+        ...current.previous,
+        ...patch,
+      },
+    }));
+  };
+
   const processFile = async (file: File | null) => {
     if (!file) return;
     setSelectedFile(file);
+    setLeadImportAudit(null);
     if (isTextLikeFile(file)) {
       setRawInput(await file.text());
+    } else {
+      setRawInput("");
     }
   };
 
@@ -387,10 +422,7 @@ export default function App() {
         body: JSON.stringify(body),
       });
       const payload = (await response.json().catch(() => null)) as
-        | {
-            recognizedInput?: MarketingInput;
-            recognitionMode?: string;
-          }
+        | RecognitionPayload
         | { error?: string }
         | null;
 
@@ -401,10 +433,16 @@ export default function App() {
       setForm(payload.recognizedInput);
       setRawInput(payload.recognizedInput.rawInput || rawInput);
       setEngineMode(payload.recognitionMode || "规则识别");
-      setRecognitionMessage("已完成数据识别，当前页面下一步会呈现全部识别结果，请先确认和补充，再生成最终看板。");
+      setLeadImportAudit(payload.importAudit || null);
+      setRecognitionMessage(
+        payload.importAudit?.sheetType === "lead_detail_sheet"
+          ? "已识别为主线索表，漏斗数据已自动填入匹配页。目标、花费和 CPS 红线仍需你继续补齐。"
+          : "已完成数据识别，当前页面下一步会呈现全部识别结果，请先确认和补充，再生成最终看板。",
+      );
       setScreen("matching");
       setResult(null);
     } catch (error: any) {
+      setLeadImportAudit(null);
       setErrorMessage(error.message || "识别失败");
     } finally {
       setRecognizing(false);
@@ -455,6 +493,7 @@ export default function App() {
     setRecognitionMessage("");
     setResult(null);
     setEngineMode("");
+    setLeadImportAudit(null);
   };
 
   const exportPdfReport = async () => {
@@ -644,7 +683,7 @@ export default function App() {
                       {isDragging ? "立即释放文件开始识别" : "投放数据导入 DATA INPUT"}
                     </h3>
                     <p className="text-gray-400 font-bold tracking-wider text-[10px] uppercase">
-                      支持上传 CSV、TXT、Markdown、Word、PDF、图片；模板下载只是辅助，不是强制要求
+                      支持上传 XLSX、CSV、TXT、Markdown、Word、PDF、图片；模板下载只是辅助，不是强制要求
                     </p>
                   </div>
 
@@ -688,7 +727,7 @@ export default function App() {
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept=".csv,.txt,.md,.docx,.pdf,image/*"
+                    accept=".xlsx,.csv,.txt,.md,.docx,.pdf,image/*"
                     onChange={(event) => processFile(event.target.files?.[0] || null)}
                     className="hidden"
                   />
@@ -701,6 +740,7 @@ export default function App() {
                         onClick={() => {
                           setSelectedFile(null);
                           setRawInput("");
+                          setLeadImportAudit(null);
                         }}
                         className="ml-2 hover:text-white transition-colors"
                       >
@@ -929,9 +969,17 @@ export default function App() {
                     </div>
                   </div>
                 </Card>
+
+                <PreviousMetricsSection previous={form.previous} onChange={setPreviousValue} />
               </div>
 
               <div className="space-y-8">
+                {leadImportAudit && (
+                  <Card className="p-8">
+                    <LeadImportAuditPanel audit={leadImportAudit} />
+                  </Card>
+                )}
+
                 <SummaryCard
                   title="数据完整度"
                   value={`${audit.completenessPercent}%`}
@@ -997,6 +1045,22 @@ export default function App() {
               </div>
             )}
 
+            {leadImportAudit?.sheetType === "lead_detail_sheet" && (
+              <div
+                className="rounded-3xl bg-yellow-50 px-6 py-5 text-sm font-bold leading-7 text-yellow-800"
+              >
+                当前内容分析来自主线索表聚合，不等于真实内容表现。目标 / 花费 / 红线仍需结合预算表或手填补齐。
+              </div>
+            )}
+
+            <div data-pdf-exclude="true">
+              <ResultModuleNavigation />
+            </div>
+
+            <ReliabilitySection reliability={result.dashboard.reliability} />
+
+            <MoMOverviewSection input={result.normalizedInput} />
+
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
               {highlights.map((item) => (
                 <SummaryCard key={`${item.title}-result`} {...item} />
@@ -1044,6 +1108,16 @@ export default function App() {
                 </div>
               </Card>
             </div>
+
+            <AnalysisReportSection analysis={result.analysis} />
+
+            <ContentRankingSection contentRanking={result.dashboard.contentRanking} />
+
+            <BudgetRecommendationsSection budgetRecommendations={result.dashboard.budgetRecommendations} />
+
+            <ActionPlanSection actionPlan={result.dashboard.actionPlan} />
+
+            <ScalePlanSection scalePlan={result.dashboard.scalePlan} />
 
           </div>
         )}
