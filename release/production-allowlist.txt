@@ -1,0 +1,18 @@
+# Production release allowlist
+# Supports exact paths and prefix globs ending with /**
+
+package.json
+package-lock.json
+server.ts
+tsconfig.json
+vite.config.ts
+src/App.tsx
+src/vite-env.d.ts
+src/components/lead-import-audit.tsx
+src/components/previous-period.tsx
+src/components/result-modules.tsx
+shared/marketing-engine.ts
+shared/ai-insight-engine.ts
+shared/adapters/lead-sheet/**
+scripts/check-release-scope.mjs
+release/production-allowlist.txt

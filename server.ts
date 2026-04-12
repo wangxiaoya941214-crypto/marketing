@@ -1,10 +1,26 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
+import { pathToFileURL } from "url";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
 import mammoth from "mammoth";
+import * as XLSX from "xlsx";
+import {
+  appendInsightsToReportPrompt,
+  generateInsights,
+} from "./shared/ai-insight-engine";
+import { auditOrderConsistency } from "./shared/adapters/lead-sheet/audit-order-consistency";
+import {
+  buildMarketingInputFromLeads,
+  type LeadSheetAdapterSidecar,
+} from "./shared/adapters/lead-sheet/build-marketing-input-from-leads";
+import {
+  detectLeadSheet,
+  type TabularSheet,
+} from "./shared/adapters/lead-sheet/detect-lead-sheet";
+import { normalizeLeadRows } from "./shared/adapters/lead-sheet/normalize-lead-row";
 import {
   analyzeMarketingInput,
   buildAiPrompt,
@@ -15,25 +31,60 @@ import {
   type MarketingInput,
 } from "./shared/marketing-engine";
 
-dotenv.config({ path: ".env.local" });
+dotenv.config({ path: ".env.local", override: true });
 dotenv.config();
 
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
+const DEFAULT_LOCAL_OPENAI_MODEL = "gpt-5.4";
+const DEFAULT_PRODUCTION_OPENAI_MODEL = "claude-sonnet-4-5-20250929-thinking";
+const DEFAULT_PRODUCTION_OPENAI_BASE_URL = "https://yunwu.ai/v1";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const SILICONFLOW_BASE_URL = process.env.SILICONFLOW_BASE_URL || "https://api.siliconflow.cn/v1";
 const SILICONFLOW_MODEL = process.env.SILICONFLOW_MODEL || "Qwen/Qwen3.5-397B-A17B";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || (IS_PRODUCTION ? "gpt-4.1-mini" : "gpt-5.4");
+const readEnv = (value?: string) => value?.trim() || undefined;
+const OPENAI_API_KEY = IS_PRODUCTION
+  ? readEnv(process.env.YUNWU_API_KEY) || readEnv(process.env.OPENAI_API_KEY)
+  : readEnv(process.env.OPENAI_API_KEY);
+const OPENAI_MODEL = IS_PRODUCTION
+  ? readEnv(process.env.YUNWU_MODEL) ||
+    readEnv(process.env.OPENAI_MODEL) ||
+    DEFAULT_PRODUCTION_OPENAI_MODEL
+  : readEnv(process.env.OPENAI_MODEL) || DEFAULT_LOCAL_OPENAI_MODEL;
+const OPENAI_BASE_URL = IS_PRODUCTION
+  ? readEnv(process.env.YUNWU_BASE_URL) ||
+    readEnv(process.env.OPENAI_BASE_URL) ||
+    DEFAULT_PRODUCTION_OPENAI_BASE_URL
+  : readEnv(process.env.OPENAI_BASE_URL);
 
-type UploadedFileInfo = {
+const createOpenAiClient = () =>
+  new OpenAI({
+    apiKey: OPENAI_API_KEY,
+    baseURL: OPENAI_BASE_URL,
+  });
+
+export type UploadedFileInfo = {
   name?: string;
   mimeType?: string;
   data?: string;
 };
 
-type AnalyzeRequestBody = {
+export type AnalyzeRequestBody = {
   input?: MarketingInput;
   rawText?: string;
   fileInfo?: UploadedFileInfo;
+};
+
+type ParsedUploadResult = {
+  patch: Partial<MarketingInput>;
+  rawText: string;
+  sidecar?: LeadSheetAdapterSidecar;
+};
+
+type RecognizedIntakeResult = {
+  patch: Partial<MarketingInput>;
+  rawText: string;
+  mode: string;
+  sidecar?: LeadSheetAdapterSidecar;
 };
 
 const buildRecognitionPrompt = () => `
@@ -109,9 +160,51 @@ const isCsvFile = (fileInfo: UploadedFileInfo) =>
   fileInfo.mimeType === "application/csv" ||
   fileInfo.name?.toLowerCase().endsWith(".csv");
 
-async function parseUploadedFile(
+const isExcelFile = (fileInfo: UploadedFileInfo) =>
+  fileInfo.mimeType === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+  fileInfo.mimeType === "application/vnd.ms-excel" ||
+  fileInfo.name?.toLowerCase().endsWith(".xlsx") ||
+  fileInfo.name?.toLowerCase().endsWith(".xls");
+
+const readWorkbookSheets = (buffer: Buffer): TabularSheet[] => {
+  const workbook = XLSX.read(buffer, {
+    type: "buffer",
+    cellDates: true,
+  });
+
+  return workbook.SheetNames.map((sheetName) => {
+    const worksheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils
+      .sheet_to_json<unknown[]>(worksheet, {
+        header: 1,
+        raw: false,
+        defval: "",
+      })
+      .map((row) => row.map((cell) => String(cell ?? "").trim()));
+
+    return {
+      name: sheetName,
+      rows,
+    };
+  });
+};
+
+const buildWorkbookRawText = (sheets: TabularSheet[]) =>
+  sheets
+    .map((sheet) => {
+      const visibleRows = sheet.rows.slice(0, 400);
+      const lines = visibleRows.map((row) => row.join("\t")).join("\n");
+      const suffix =
+        sheet.rows.length > visibleRows.length
+          ? `\n... 其余 ${sheet.rows.length - visibleRows.length} 行已省略`
+          : "";
+      return `### Sheet: ${sheet.name}\n${lines}${suffix}`;
+    })
+    .join("\n\n");
+
+export async function parseUploadedFile(
   fileInfo?: UploadedFileInfo,
-): Promise<{ patch: Partial<MarketingInput>; rawText: string }> {
+): Promise<ParsedUploadResult> {
   if (!fileInfo?.data) {
     return { patch: {}, rawText: "" };
   }
@@ -132,6 +225,35 @@ async function parseUploadedFile(
     return {
       patch: parseTemplateCsv(text),
       rawText: text,
+    };
+  }
+
+  if (isExcelFile(fileInfo)) {
+    const sheets = readWorkbookSheets(buffer);
+    const rawText = buildWorkbookRawText(sheets);
+    const detection = detectLeadSheet(sheets);
+
+    if (detection.kind === "lead_detail_sheet") {
+      const normalized = normalizeLeadRows(sheets, detection);
+      const orderAudit = auditOrderConsistency(normalized.rows);
+      const built = buildMarketingInputFromLeads({
+        detection,
+        rows: normalized.rows,
+        rawText,
+        orderAudit,
+        missingFields: normalized.missingFields,
+      });
+
+      return {
+        patch: built.input,
+        rawText,
+        sidecar: built.sidecar,
+      };
+    }
+
+    return {
+      patch: parseMarketingInputText(rawText),
+      rawText,
     };
   }
 
@@ -158,11 +280,13 @@ const safeJsonParse = (text: string) => {
   }
 };
 
-async function recognizeUploadedFileWithAi(fileInfo: UploadedFileInfo) {
+async function recognizeUploadedFileWithAi(
+  fileInfo: UploadedFileInfo,
+): Promise<RecognizedIntakeResult> {
   const mimeType = fileInfo.mimeType || "application/octet-stream";
 
   const tryOpenAiRecognition = async () => {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const openai = createOpenAiClient();
     const response = await openai.chat.completions.create({
       model: OPENAI_MODEL,
       messages: [
@@ -189,6 +313,7 @@ async function recognizeUploadedFileWithAi(fileInfo: UploadedFileInfo) {
       patch: safeJsonParse(text) as Partial<MarketingInput>,
       rawText: text,
       mode: `AI识别（${OPENAI_MODEL}）`,
+      sidecar: undefined,
     };
   };
 
@@ -219,33 +344,65 @@ async function recognizeUploadedFileWithAi(fileInfo: UploadedFileInfo) {
       patch: safeJsonParse(text) as Partial<MarketingInput>,
       rawText: text,
       mode: `AI识别（${GEMINI_MODEL}）`,
+      sidecar: undefined,
     };
   };
 
-  if (!IS_PRODUCTION && process.env.OPENAI_API_KEY) {
-    return tryOpenAiRecognition();
+  let lastError: unknown = null;
+
+  if (OPENAI_API_KEY) {
+    try {
+      return await tryOpenAiRecognition();
+    } catch (error) {
+      lastError = error;
+    }
   }
 
   if (process.env.GEMINI_API_KEY) {
-    return tryGeminiRecognition();
+    try {
+      return await tryGeminiRecognition();
+    } catch (error) {
+      lastError = error;
+    }
   }
 
-  if (process.env.OPENAI_API_KEY) {
-    return tryOpenAiRecognition();
+  if (lastError) {
+    throw lastError;
   }
 
-  throw new Error("图片 / PDF 智能识别目前需要先配置 GEMINI_API_KEY 或 OPENAI_API_KEY。SiliconFlow 当前用于文本分析增强。");
+  throw new Error(
+    IS_PRODUCTION
+      ? "图片 / PDF 智能识别目前需要先配置 YUNWU_API_KEY（或 OPENAI_API_KEY）或 GEMINI_API_KEY。"
+      : "图片 / PDF 智能识别目前需要先配置 OPENAI_API_KEY 或 GEMINI_API_KEY。",
+  );
 }
 
-async function recognizeIntake(body: AnalyzeRequestBody) {
+export async function recognizeIntake(body: AnalyzeRequestBody): Promise<RecognizedIntakeResult> {
   if (body.fileInfo?.data) {
     const mimeType = body.fileInfo.mimeType || "application/octet-stream";
-    if (isWordDocument(body.fileInfo) || isCsvFile(body.fileInfo) || isTextLikeMimeType(mimeType)) {
+    if (
+      isWordDocument(body.fileInfo) ||
+      isCsvFile(body.fileInfo) ||
+      isExcelFile(body.fileInfo) ||
+      isTextLikeMimeType(mimeType)
+    ) {
       const parsed = await parseUploadedFile(body.fileInfo);
       return {
         patch: parsed.patch,
         rawText: parsed.rawText,
-        mode: isCsvFile(body.fileInfo) ? "模板识别（CSV）" : "规则识别",
+        sidecar: parsed.sidecar,
+        mode: (() => {
+          if (parsed.sidecar?.sheetType === "lead_detail_sheet") {
+            return "主线索表识别（XLSX）";
+          }
+          if (isCsvFile(body.fileInfo)) {
+            return "模板识别（CSV）";
+          }
+          if (isExcelFile(body.fileInfo)) {
+            return "工作簿读取（XLSX）";
+          }
+          return "规则识别";
+        })(),
       };
     }
     return recognizeUploadedFileWithAi(body.fileInfo);
@@ -256,6 +413,7 @@ async function recognizeIntake(body: AnalyzeRequestBody) {
       patch: parseMarketingInputText(body.rawText),
       rawText: body.rawText,
       mode: "规则识别",
+      sidecar: undefined,
     };
   }
 
@@ -263,12 +421,13 @@ async function recognizeIntake(body: AnalyzeRequestBody) {
     patch: {},
     rawText: "",
     mode: "无识别输入",
+    sidecar: undefined,
   };
 }
 
 async function generateAiEnhancedReport(prompt: string) {
   const tryOpenAiReport = async () => {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const openai = createOpenAiClient();
     const response = await openai.chat.completions.create({
       model: OPENAI_MODEL,
       messages: [{ role: "user", content: prompt }],
@@ -319,30 +478,61 @@ async function generateAiEnhancedReport(prompt: string) {
     throw new Error("SiliconFlow 返回内容不完整。");
   };
 
-  if (!IS_PRODUCTION && process.env.OPENAI_API_KEY) {
-    return tryOpenAiReport();
-  }
+  let lastError: unknown = null;
 
-  if (IS_PRODUCTION && process.env.SILICONFLOW_API_KEY) {
-    return trySiliconFlowReport();
+  if (OPENAI_API_KEY) {
+    try {
+      return await tryOpenAiReport();
+    } catch (error) {
+      lastError = error;
+    }
   }
 
   if (process.env.GEMINI_API_KEY) {
-    return tryGeminiReport();
+    try {
+      return await tryGeminiReport();
+    } catch (error) {
+      lastError = error;
+    }
   }
 
   if (process.env.SILICONFLOW_API_KEY) {
-    return trySiliconFlowReport();
+    try {
+      return await trySiliconFlowReport();
+    } catch (error) {
+      lastError = error;
+    }
   }
 
-  if (process.env.OPENAI_API_KEY) {
-    return tryOpenAiReport();
+  if (lastError) {
+    throw lastError;
   }
 
   return null;
 }
 
-async function startServer() {
+export const buildRecognizeInputResponse = async (body: AnalyzeRequestBody) => {
+  const recognized = await recognizeIntake(body);
+  let merged = createEmptyInput();
+  merged = mergeMarketingInput(merged, recognized.patch);
+  if (body.input) {
+    merged = mergeMarketingInput(merged, body.input);
+  }
+  merged.rawInput = [recognized.rawText, body.rawText, body.input?.rawInput]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const result = analyzeMarketingInput(merged);
+
+  return {
+    recognizedInput: result.normalizedInput,
+    dashboardPreview: result.dashboard,
+    recognitionMode: recognized.mode,
+    importAudit: recognized.sidecar || null,
+  };
+};
+
+export async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
@@ -375,11 +565,14 @@ async function startServer() {
         .join("\n\n");
 
       const result = analyzeMarketingInput(merged);
+      const insights = await generateInsights(result.dashboard, result.normalizedInput);
       let analysis = result.fallbackReport;
       let engineMode = "规则保底引擎";
 
       try {
-        const aiResult = await generateAiEnhancedReport(buildAiPrompt(result));
+        const aiResult = await generateAiEnhancedReport(
+          appendInsightsToReportPrompt(buildAiPrompt(result), insights),
+        );
         if (aiResult) {
           analysis = aiResult.report;
           engineMode = aiResult.mode;
@@ -392,6 +585,7 @@ async function startServer() {
         analysis,
         dashboard: result.dashboard,
         normalizedInput: result.normalizedInput,
+        insights,
         engineMode,
       });
     } catch (error: any) {
@@ -406,23 +600,7 @@ async function startServer() {
     const body = (req.body || {}) as AnalyzeRequestBody;
 
     try {
-      const recognized = await recognizeIntake(body);
-      let merged = createEmptyInput();
-      merged = mergeMarketingInput(merged, recognized.patch);
-      if (body.input) {
-        merged = mergeMarketingInput(merged, body.input);
-      }
-      merged.rawInput = [recognized.rawText, body.rawText, body.input?.rawInput]
-        .filter(Boolean)
-        .join("\n\n");
-
-      const result = analyzeMarketingInput(merged);
-
-      res.json({
-        recognizedInput: result.normalizedInput,
-        dashboardPreview: result.dashboard,
-        recognitionMode: recognized.mode,
-      });
+      res.json(await buildRecognizeInputResponse(body));
     } catch (error: any) {
       console.error(error);
       res.status(500).json({
@@ -440,14 +618,26 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*", (req, res) => {
+    app.get("/{*splat}", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  const server = app.listen(PORT, "0.0.0.0", (error?: Error) => {
+    if (error) {
+      throw error;
+    }
+
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : PORT;
+    console.log(`Server running on http://localhost:${port}`);
   });
 }
 
-startServer();
+const isDirectExecution =
+  Boolean(process.argv[1]) &&
+  pathToFileURL(process.argv[1]).href === import.meta.url;
+
+if (isDirectExecution) {
+  startServer();
+}
