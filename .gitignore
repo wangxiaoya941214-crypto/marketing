@@ -6,3 +6,8 @@ coverage/
 *.log
 .env*
 !.env.example
+playwright-report/
+test-results/
+reports/browser-check/runs/
+reports/browser-check/latest.md
+reports/browser-check/latest.json

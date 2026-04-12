@@ -35,12 +35,47 @@ import {
   type MarketingDashboardData,
   type MarketingInput,
 } from "../shared/marketing-engine";
+import type { InsightResult } from "../shared/ai-insight-engine";
+import type { RecognitionAudit } from "../shared/recognition-audit";
+import {
+  ActionPlanSection,
+  AnalysisReportSection,
+  BudgetRecommendationsSection,
+  ContentRankingSection,
+  ReliabilitySection,
+  ResultModuleNavigation,
+  ScalePlanSection,
+} from "./components/result-modules";
+import {
+  MoMOverviewSection,
+  PreviousMetricsSection,
+} from "./components/previous-period";
+import {
+  LeadImportAuditPanel,
+  RecognitionAuditPanel,
+} from "./components/lead-import-audit";
+import type { LeadSheetAdapterSidecar } from "../shared/adapters/lead-sheet/build-marketing-input-from-leads";
+
+const EMPTY_INSIGHTS: InsightResult = {
+  anomalies: [],
+  opportunities: [],
+  risks: [],
+  topFindings: [],
+};
 
 type ResultPayload = {
   analysis: string;
   dashboard: MarketingDashboardData;
   normalizedInput: MarketingInput;
+  insights: InsightResult;
   engineMode: string;
+};
+
+type RecognitionPayload = {
+  recognizedInput?: MarketingInput;
+  recognitionMode?: string;
+  importAudit?: LeadSheetAdapterSidecar | null;
+  recognitionAudit?: RecognitionAudit | null;
 };
 
 type Screen = "home" | "matching" | "result";
@@ -70,6 +105,35 @@ const formatCount = (value: number | null | undefined, unit = "人") =>
 
 const formatRate = (value: number | null | undefined) =>
   value === null || value === undefined ? "——" : `${Math.round(value * 1000) / 10}%`;
+
+const buildRecognitionMessage = (
+  recognitionAudit?: RecognitionAudit | null,
+  importAudit?: LeadSheetAdapterSidecar | null,
+) => {
+  if (!recognitionAudit) {
+    return importAudit?.sheetType === "lead_detail_sheet"
+      ? "已识别为主线索表，漏斗数据已自动填入匹配页。目标、花费和 CPS 红线仍需你继续补齐。"
+      : "已完成数据识别，当前页面下一步会呈现全部识别结果，请先确认和补充，再生成最终看板。";
+  }
+
+  if (recognitionAudit.confidence === "low") {
+    return `本次识别置信度低，请优先复核：${recognitionAudit.recommendedFocus.join("、") || "关键漏斗和费用字段"}。`;
+  }
+
+  if (recognitionAudit.confidence === "medium") {
+    return `当前识别可继续使用，但建议先复核：${recognitionAudit.recommendedFocus.join("、") || "关键字段"}。`;
+  }
+
+  if (importAudit?.sheetType === "lead_detail_sheet") {
+    return recognitionAudit.fallbackUsed
+      ? "已按主线索表完成规则抽取，并补充了 AI 空白字段。请先确认目标、花费和 CPS 红线。"
+      : "已识别为主线索表，漏斗数据已自动填入匹配页。目标、花费和 CPS 红线仍需你继续补齐。";
+  }
+
+  return recognitionAudit.fallbackUsed
+    ? "规则抽取已完成，且已用 AI 补全部分空白字段，请确认后继续生成最终看板。"
+    : "已完成数据识别，当前页面下一步会呈现全部识别结果，请先确认和补充，再生成最终看板。";
+};
 
 const downloadFile = (name: string, content: string, mimeType = "text/csv;charset=utf-8") => {
   const blob = new Blob([content], { type: mimeType });
@@ -288,6 +352,8 @@ export default function App() {
   const [recognitionMessage, setRecognitionMessage] = useState("");
   const [result, setResult] = useState<ResultPayload | null>(null);
   const [engineMode, setEngineMode] = useState("");
+  const [leadImportAudit, setLeadImportAudit] = useState<LeadSheetAdapterSidecar | null>(null);
+  const [recognitionAudit, setRecognitionAudit] = useState<RecognitionAudit | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const audit = auditMarketingInput({
@@ -352,11 +418,25 @@ export default function App() {
     });
   };
 
+  const setPreviousValue = (patch: Partial<MarketingInput["previous"]>) => {
+    setForm((current) => ({
+      ...current,
+      previous: {
+        ...current.previous,
+        ...patch,
+      },
+    }));
+  };
+
   const processFile = async (file: File | null) => {
     if (!file) return;
     setSelectedFile(file);
+    setLeadImportAudit(null);
+    setRecognitionAudit(null);
     if (isTextLikeFile(file)) {
       setRawInput(await file.text());
+    } else {
+      setRawInput("");
     }
   };
 
@@ -365,6 +445,7 @@ export default function App() {
     setRecognizing(true);
     setErrorMessage("");
     setRecognitionMessage("");
+    setRecognitionAudit(null);
 
     try {
       const body: Record<string, unknown> = {};
@@ -387,10 +468,7 @@ export default function App() {
         body: JSON.stringify(body),
       });
       const payload = (await response.json().catch(() => null)) as
-        | {
-            recognizedInput?: MarketingInput;
-            recognitionMode?: string;
-          }
+        | RecognitionPayload
         | { error?: string }
         | null;
 
@@ -401,10 +479,16 @@ export default function App() {
       setForm(payload.recognizedInput);
       setRawInput(payload.recognizedInput.rawInput || rawInput);
       setEngineMode(payload.recognitionMode || "规则识别");
-      setRecognitionMessage("已完成数据识别，当前页面下一步会呈现全部识别结果，请先确认和补充，再生成最终看板。");
+      setLeadImportAudit(payload.importAudit || null);
+      setRecognitionAudit(payload.recognitionAudit || null);
+      setRecognitionMessage(
+        buildRecognitionMessage(payload.recognitionAudit || null, payload.importAudit || null),
+      );
       setScreen("matching");
       setResult(null);
     } catch (error: any) {
+      setLeadImportAudit(null);
+      setRecognitionAudit(null);
       setErrorMessage(error.message || "识别失败");
     } finally {
       setRecognizing(false);
@@ -433,8 +517,12 @@ export default function App() {
       if (!response.ok || !payload || !("analysis" in payload)) {
         throw new Error(payload && "error" in payload ? payload.error || "分析失败" : "分析失败");
       }
-      setResult(payload);
-      setEngineMode(payload.engineMode);
+      const nextResult: ResultPayload = {
+        ...payload,
+        insights: "insights" in payload && payload.insights ? payload.insights : EMPTY_INSIGHTS,
+      };
+      setResult(nextResult);
+      setEngineMode(nextResult.engineMode);
       setScreen("result");
     } catch (error: any) {
       setErrorMessage(error.message || "分析失败");
@@ -455,6 +543,8 @@ export default function App() {
     setRecognitionMessage("");
     setResult(null);
     setEngineMode("");
+    setLeadImportAudit(null);
+    setRecognitionAudit(null);
   };
 
   const exportPdfReport = async () => {
@@ -644,7 +734,7 @@ export default function App() {
                       {isDragging ? "立即释放文件开始识别" : "投放数据导入 DATA INPUT"}
                     </h3>
                     <p className="text-gray-400 font-bold tracking-wider text-[10px] uppercase">
-                      支持上传 CSV、TXT、Markdown、Word、PDF、图片；模板下载只是辅助，不是强制要求
+                      支持上传 XLSX、CSV、TXT、Markdown、Word、PDF、图片；模板下载只是辅助，不是强制要求
                     </p>
                   </div>
 
@@ -688,7 +778,7 @@ export default function App() {
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept=".csv,.txt,.md,.docx,.pdf,image/*"
+                    accept=".xlsx,.csv,.txt,.md,.docx,.pdf,image/*"
                     onChange={(event) => processFile(event.target.files?.[0] || null)}
                     className="hidden"
                   />
@@ -701,6 +791,8 @@ export default function App() {
                         onClick={() => {
                           setSelectedFile(null);
                           setRawInput("");
+                          setLeadImportAudit(null);
+                          setRecognitionAudit(null);
                         }}
                         className="ml-2 hover:text-white transition-colors"
                       >
@@ -929,9 +1021,23 @@ export default function App() {
                     </div>
                   </div>
                 </Card>
+
+                <PreviousMetricsSection previous={form.previous} onChange={setPreviousValue} />
               </div>
 
               <div className="space-y-8">
+                {recognitionAudit && (
+                  <Card className="p-8">
+                    <RecognitionAuditPanel audit={recognitionAudit} />
+                  </Card>
+                )}
+
+                {leadImportAudit && (
+                  <Card className="p-8">
+                    <LeadImportAuditPanel audit={leadImportAudit} />
+                  </Card>
+                )}
+
                 <SummaryCard
                   title="数据完整度"
                   value={`${audit.completenessPercent}%`}
@@ -997,6 +1103,22 @@ export default function App() {
               </div>
             )}
 
+            {leadImportAudit?.sheetType === "lead_detail_sheet" && (
+              <div
+                className="rounded-3xl bg-yellow-50 px-6 py-5 text-sm font-bold leading-7 text-yellow-800"
+              >
+                当前内容分析来自主线索表聚合，不等于真实内容表现。目标 / 花费 / 红线仍需结合预算表或手填补齐。
+              </div>
+            )}
+
+            <div data-pdf-exclude="true">
+              <ResultModuleNavigation />
+            </div>
+
+            <ReliabilitySection reliability={result.dashboard.reliability} />
+
+            <MoMOverviewSection input={result.normalizedInput} />
+
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
               {highlights.map((item) => (
                 <SummaryCard key={`${item.title}-result`} {...item} />
@@ -1044,6 +1166,16 @@ export default function App() {
                 </div>
               </Card>
             </div>
+
+            <AnalysisReportSection analysis={result.analysis} insights={result.insights} />
+
+            <ContentRankingSection contentRanking={result.dashboard.contentRanking} />
+
+            <BudgetRecommendationsSection budgetRecommendations={result.dashboard.budgetRecommendations} />
+
+            <ActionPlanSection actionPlan={result.dashboard.actionPlan} />
+
+            <ScalePlanSection scalePlan={result.dashboard.scalePlan} />
 
           </div>
         )}

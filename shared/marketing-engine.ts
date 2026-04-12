@@ -46,8 +46,10 @@ export interface MarketingContentInput {
 }
 
 export interface PreviousMetricsInput {
+  totalDeals: NullableNumber;
   flexibleDeals: NullableNumber;
   superDeals: NullableNumber;
+  overallCps: NullableNumber;
   flexibleCps: NullableNumber;
   superCps: NullableNumber;
   cpl: NullableNumber;
@@ -250,8 +252,10 @@ const EMPTY_SPLIT = (): SplitNumberInput => ({
 });
 
 const EMPTY_PREVIOUS = (): PreviousMetricsInput => ({
+  totalDeals: null,
   flexibleDeals: null,
   superDeals: null,
+  overallCps: null,
   flexibleCps: null,
   superCps: null,
   cpl: null,
@@ -329,8 +333,10 @@ const FIELD_NOTES: Array<[string, string]> = [
   ["第四层成交台数_总计", "单位：台"],
   ["第四层成交台数_灵活订阅", "单位：台"],
   ["第四层成交台数_超级订阅", "单位：台"],
+  ["上期成交量", "选填，聚合口径"],
   ["上期成交台数_灵活订阅", "选填"],
   ["上期成交台数_超级订阅", "选填"],
+  ["上期CPS", "选填，聚合口径，单位元/台"],
   ["上期CPS_灵活订阅", "选填"],
   ["上期CPS_超级订阅", "选填"],
   ["上期每条客资花费", "选填"],
@@ -584,8 +590,10 @@ export const sanitizeMarketingInput = (input: MarketingInput): MarketingInput =>
     },
     contents: normalizeContents(input.contents || []),
     previous: {
+      totalDeals: safeNumber(input.previous?.totalDeals),
       flexibleDeals: safeNumber(input.previous?.flexibleDeals),
       superDeals: safeNumber(input.previous?.superDeals),
+      overallCps: safeNumber(input.previous?.overallCps),
       flexibleCps: safeNumber(input.previous?.flexibleCps),
       superCps: safeNumber(input.previous?.superCps),
       cpl: safeNumber(input.previous?.cpl),
@@ -885,11 +893,17 @@ export const parseTemplateCsv = (csv: string): Partial<MarketingInput> => {
       第四层成交台数_超级订阅: () => {
         patch.funnel!.deals.super = safeNumber(value);
       },
+      上期成交量: () => {
+        patch.previous!.totalDeals = safeNumber(value);
+      },
       上期成交台数_灵活订阅: () => {
         patch.previous!.flexibleDeals = safeNumber(value);
       },
       上期成交台数_超级订阅: () => {
         patch.previous!.superDeals = safeNumber(value);
+      },
+      上期CPS: () => {
+        patch.previous!.overallCps = safeNumber(value);
       },
       上期CPS_灵活订阅: () => {
         patch.previous!.flexibleCps = safeNumber(value);
@@ -1359,9 +1373,11 @@ const buildFunnelInsight = (metrics: ProductMetrics): FunnelInsight => {
     const nextStage = stages[index + 1];
     const lossCount =
       stage.value !== null && nextStage.value !== null ? Math.max(stage.value - nextStage.value, 0) : null;
+    const firstStageValue = stages[0]?.value ?? null;
+    const lastStageValue = stages[stages.length - 1]?.value ?? null;
     const totalLossBase =
-      stages[0].value !== null && stages[stages.length - 1].value !== null
-        ? Math.max(stages[0].value - stages[stages.length - 1].value, 0)
+      firstStageValue !== null && lastStageValue !== null
+        ? Math.max(firstStageValue - lastStageValue, 0)
         : null;
 
     return {
