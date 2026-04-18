@@ -1,4 +1,4 @@
-import type { LeadSheetAdapterSidecar } from "./adapters/lead-sheet/build-marketing-input-from-leads";
+import type { LeadSheetAdapterSidecar } from "./adapters/lead-sheet/build-marketing-input-from-leads.ts";
 
 export type RecognitionExtractor = "rule" | "rule_then_ai" | "ai_primary";
 export type RecognitionSourceType =

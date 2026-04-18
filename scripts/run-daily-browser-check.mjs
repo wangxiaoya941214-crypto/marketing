@@ -15,7 +15,16 @@ const feedbackPath = path.join(reportsRoot, "用户反馈.md");
 const latestSummaryPath = path.join(reportsRoot, "latest.json");
 const latestReportPath = path.join(reportsRoot, "latest.md");
 const port = process.env.PLAYWRIGHT_PORT || "3101";
-const baseURL = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${port}`;
+const defaultLocalBaseURL = `http://127.0.0.1:${port}`;
+const configuredBaseURL =
+  process.env.PLAYWRIGHT_BASE_URL?.trim() ||
+  process.env.APP_URL?.trim() ||
+  defaultLocalBaseURL;
+const fallbackBaseURLs = (process.env.PLAYWRIGHT_FALLBACK_BASE_URLS || "")
+  .split(",")
+  .map((item) => item.trim())
+  .filter(Boolean);
+const customServerCommand = process.env.PLAYWRIGHT_SERVER_COMMAND?.trim();
 
 const now = new Date();
 const runId = now.toISOString().replace(/\.\d{3}Z$/, "Z").replace(/:/g, "-");
@@ -26,6 +35,13 @@ const jsonReportPath = path.join(runDir, "playwright-report.json");
 const runLogPath = path.join(runDir, "run.log");
 const markdownPath = path.join(runDir, "测试报告.md");
 const summaryJsonPath = path.join(runDir, "summary.json");
+const requiredChainChecks = [
+  {
+    key: "closedLoop",
+    label: "主链：闭环分析",
+    matcher: /闭环分析主链会经过导入、复核、结果页和经营驾驶舱/u,
+  },
+];
 
 const ensureDir = async (dirPath) => {
   await fs.mkdir(dirPath, { recursive: true });
@@ -86,6 +102,18 @@ const isServerReady = async (url) => {
   }
 };
 
+const unique = (items) => [...new Set(items.filter(Boolean))];
+
+const resolveReachableBaseURL = async (candidates) => {
+  for (const candidate of unique(candidates)) {
+    if (await isServerReady(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+};
+
 const waitForServer = async (url, timeoutMs = 30_000) => {
   const start = Date.now();
 
@@ -100,25 +128,96 @@ const waitForServer = async (url, timeoutMs = 30_000) => {
   throw new Error(`本地服务未能在 ${timeoutMs}ms 内启动：${url}`);
 };
 
+const buildServerStartupError = (error, outputPreview = "") => {
+  const baseMessage = error instanceof Error ? error.message : String(error);
+  const preview = outputPreview.trim();
+
+  if (/listen (EPERM|EACCES)|operation not permitted|permission denied/i.test(`${baseMessage}\n${preview}`)) {
+    return new Error(
+      [
+        `本地服务启动被当前执行环境拦截，无法监听 ${defaultLocalBaseURL}。`,
+        "这通常不是业务代码报错，而是运行环境禁止本地开端口。",
+        "可选修复：1）先启动一个可访问的服务，并通过 PLAYWRIGHT_BASE_URL 或 APP_URL 复用；2）在允许监听端口的 Runner 里执行；3）用 PLAYWRIGHT_SERVER_COMMAND 改成外部可运行的启动命令。",
+        preview ? `启动输出：\n${preview}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    );
+  }
+
+  if (preview) {
+    return new Error(`${baseMessage}\n\n启动输出：\n${preview}`);
+  }
+
+  return error instanceof Error ? error : new Error(baseMessage);
+};
+
 const startLocalServer = async (outputChunks) => {
-  const command = process.platform === "win32" ? "env.exe" : "env";
-  const args = [`PORT=${port}`, "node", "--import", "tsx", "server.ts"];
-  const child = spawn(command, args, {
-    cwd: rootDir,
-    env: process.env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const child = customServerCommand
+    ? spawn(customServerCommand, {
+        cwd: rootDir,
+        env: {
+          ...process.env,
+          NODE_ENV: process.env.NODE_ENV || "production",
+          HOST: process.env.HOST || "127.0.0.1",
+          PORT: port,
+        },
+        shell: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+    : spawn(process.platform === "win32" ? "env.exe" : "env", [
+        "NODE_ENV=production",
+        "HOST=127.0.0.1",
+        `PORT=${port}`,
+        "node",
+        "--import",
+        "tsx",
+        "server.ts",
+      ], {
+        cwd: rootDir,
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+  let startupOutput = "";
 
   const onChunk = (chunk, stream, label) => {
     const text = chunk.toString();
     outputChunks.push(`[${label}] ${text}`);
+    startupOutput = `${startupOutput}${text}`.slice(-6000);
     stream.write(text);
   };
 
   child.stdout.on("data", (chunk) => onChunk(chunk, process.stdout, "AppServer"));
   child.stderr.on("data", (chunk) => onChunk(chunk, process.stderr, "AppServer"));
 
-  await waitForServer(baseURL);
+  await new Promise((resolve, reject) => {
+    let settled = false;
+
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(buildServerStartupError(error, startupOutput));
+    };
+
+    child.once("error", fail);
+    child.once("exit", (code, signal) => {
+      if (settled) return;
+      fail(
+        new Error(
+          `本地服务在启动完成前退出（code=${code ?? "null"}, signal=${signal ?? "null"}）。`,
+        ),
+      );
+    });
+
+    waitForServer(defaultLocalBaseURL)
+      .then(() => {
+        if (settled) return;
+        settled = true;
+        resolve(undefined);
+      })
+      .catch(fail);
+  });
 
   return child;
 };
@@ -140,7 +239,7 @@ const stopChildProcess = async (child) => {
   });
 };
 
-const runPlaywright = async (outputChunks) => {
+const runPlaywright = async (outputChunks, activeBaseURL) => {
   await ensureDir(runDir);
 
   const env = {
@@ -149,12 +248,16 @@ const runPlaywright = async (outputChunks) => {
     PLAYWRIGHT_HTML_OUTPUT_DIR: htmlDir,
     PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReportPath,
     PLAYWRIGHT_DISABLE_WEB_SERVER: "1",
-    PLAYWRIGHT_BASE_URL: baseURL,
+    PLAYWRIGHT_BASE_URL: activeBaseURL,
     PLAYWRIGHT_PORT: port,
   };
 
   const command = process.platform === "win32" ? "npx.cmd" : "npx";
-  const args = ["playwright", "test", "tests/e2e/daily-smoke.spec.ts"];
+  const args = [
+    "playwright",
+    "test",
+    "tests/e2e/closed-loop-workspace.spec.ts",
+  ];
 
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -259,12 +362,37 @@ const buildDiff = (currentFailures, previousFailures) => {
   };
 };
 
+const buildCoverage = (records) => {
+  const results = requiredChainChecks.map((item) => {
+    const matched = records.filter((record) => item.matcher.test(record.title));
+    const failed = matched.some(
+      (record) => record.status !== "passed" && record.status !== "skipped",
+    );
+    return {
+      ...item,
+      matchedTitles: matched.map((record) => record.title),
+      covered: matched.length > 0,
+      passed: matched.length > 0 && !failed,
+    };
+  });
+
+  return {
+    results,
+    coveredLabels: results.filter((item) => item.covered).map((item) => item.label),
+    missingLabels: results.filter((item) => !item.covered).map((item) => item.label),
+  };
+};
+
 const heuristicConclusion = (summary, diff, feedbackText) => {
+  if (summary.coverage.missingLabels.length > 0) {
+    return `本次日报没有完整覆盖 ${summary.coverage.missingLabels.join("、")}，当前结果不能用于判定整站通过。`;
+  }
+
   if (summary.failedCases.length === 0) {
     if (feedbackText.trim()) {
       return "本次自动巡检未复现明显阻断问题，但已有用户反馈待人工复核，建议优先对照截图和反馈步骤补一轮定向回归。";
     }
-    return "本次自动巡检通过，主流程已成功从数据导入走到诊断报告页，暂未发现阻断性异常。";
+    return "本次自动巡检已完成闭环分析主链验证，暂未发现阻断性异常。";
   }
 
   if (diff.newFailures.length > 0) {
@@ -275,12 +403,53 @@ const heuristicConclusion = (summary, diff, feedbackText) => {
 };
 
 const buildResolutionSection = ({ summary, failedCases, combinedOutput }) => {
+  if (summary.coverage.missingLabels.length > 0) {
+    return {
+      rootCause: `日报脚本没有覆盖 ${summary.coverage.missingLabels.join("、")}，当前结论天然不完整。`,
+      minimumFix: "先把主链缺失步骤补进每日巡检，再用同一份日报只汇总闭环分析主链结果。",
+      validation: "重新跑 `npm run test:e2e:daily`，确认报告里明确出现主链导入、复核、结果页和经营驾驶舱。",
+      coordination: "测试先补脚本；前后端只在补完主链覆盖后再看真实产品问题。",
+    };
+  }
+
   if (summary.failedCases.length === 0) {
     return {
       rootCause: "本次自动巡检没有发现阻断问题，当前不需要额外修复动作。",
       minimumFix: "继续保留现有回归用例和每日巡检节奏即可。",
       validation: "下次巡检继续通过，并且用户反馈里没有新增阻断问题。",
       coordination: "当前不需要前端、后端、测试额外联动。",
+    };
+  }
+
+  const isEnvironmentBlocked = failedCases.some(
+    (item) =>
+      item.errorMessage.includes("环境阻断") ||
+      item.errorMessage.includes("闭环接口未配置鉴权令牌") ||
+      combinedOutput.includes("闭环接口未配置鉴权令牌"),
+  );
+
+  if (isEnvironmentBlocked) {
+    return {
+      rootCause: "当前不是页面交互坏了，而是运行环境缺少闭环鉴权配置，主链在导入阶段就被拦住。",
+      minimumFix: "先补 `CLOSED_LOOP_API_TOKEN`，并确认本地巡检环境与前端使用的闭环角色口径一致。",
+      validation: "重新跑 `tests/e2e/closed-loop-workspace.spec.ts`，确认能完成导入、复核并进入经营驾驶舱。",
+      coordination: "后端或运维先补环境变量；测试随后复跑主链；前端最后确认页面状态文案是否仍准确。",
+    };
+  }
+
+  const isLegacyEntryOutdated = failedCases.some(
+    (item) =>
+      item.errorMessage.includes("locator.fill") ||
+      item.errorMessage.includes("打开 Legacy") ||
+      item.errorMessage.includes("还原成交链路"),
+  );
+
+  if (isLegacyEntryOutdated) {
+    return {
+      rootCause: "巡检脚本还在按旧入口或旧工作台操作，当前首页已经切回闭环主链工作台。",
+      minimumFix: "先修用例入口和选择器，别再把闭环文件默认送进旧 V2 或兼容链。",
+      validation: "重跑 `tests/e2e/closed-loop-workspace.spec.ts`，确认能进入导入、复核、结果页和经营驾驶舱。",
+      coordination: "测试先修脚本；前端只需在入口再次变更时同步通知测试更新用例。",
     };
   }
 
@@ -385,6 +554,11 @@ const renderMarkdown = ({ summary, diff, feedbackText, aiSummary, heuristicText,
     "",
     heuristicText,
     "",
+    "## 双链覆盖",
+    "",
+    `- 已覆盖：${summary.coverage.coveredLabels.length ? summary.coverage.coveredLabels.join("；") : "无"}`,
+    `- 未覆盖：${summary.coverage.missingLabels.length ? summary.coverage.missingLabels.join("；") : "无"}`,
+    "",
     "## 与上次相比",
     "",
     `- 新增失败：${diff.newFailures.length ? diff.newFailures.join("；") : "无"}`,
@@ -452,16 +626,54 @@ const main = async () => {
   const outputChunks = [];
   let serverProcess = null;
   let exitCode = 1;
-  const shouldReuseRunningServer =
-    process.env.PLAYWRIGHT_SKIP_SERVER_START === "1" || (await isServerReady(baseURL));
+  let activeBaseURL = configuredBaseURL;
+  let reusedServer = false;
+  const explicitRemoteExecution =
+    Boolean(process.env.PLAYWRIGHT_SKIP_SERVER_START === "1") ||
+    Boolean(process.env.PLAYWRIGHT_BASE_URL?.trim()) ||
+    Boolean(process.env.APP_URL?.trim());
 
   try {
-    if (shouldReuseRunningServer) {
-      outputChunks.push(`[AppServer] 复用已启动服务：${baseURL}\n`);
+    const explicitReachableBaseURL = await resolveReachableBaseURL([
+      configuredBaseURL,
+      ...fallbackBaseURLs,
+    ]);
+
+    if (explicitRemoteExecution) {
+      if (!explicitReachableBaseURL) {
+        throw new Error(
+          [
+            "当前要求复用已启动服务，但没有发现可访问的目标地址。",
+            `已检查：${unique([configuredBaseURL, ...fallbackBaseURLs]).join("，") || "无"}`,
+            "请先启动服务，或设置 PLAYWRIGHT_BASE_URL / APP_URL 指向一个可访问地址。",
+          ].join("\n"),
+        );
+      }
+      activeBaseURL = explicitReachableBaseURL;
+      reusedServer = true;
+      outputChunks.push(`[AppServer] 复用已启动服务：${activeBaseURL}\n`);
+    } else if (await isServerReady(defaultLocalBaseURL)) {
+      activeBaseURL = defaultLocalBaseURL;
+      reusedServer = true;
+      outputChunks.push(`[AppServer] 复用已启动服务：${activeBaseURL}\n`);
     } else {
-      serverProcess = await startLocalServer(outputChunks);
+      try {
+        serverProcess = await startLocalServer(outputChunks);
+        activeBaseURL = defaultLocalBaseURL;
+      } catch (error) {
+        const reachableFallbackBaseURL = await resolveReachableBaseURL(fallbackBaseURLs);
+        if (reachableFallbackBaseURL) {
+          activeBaseURL = reachableFallbackBaseURL;
+          reusedServer = true;
+          outputChunks.push(
+            `[AppServer] 本地端口启动失败，改为复用外部服务：${activeBaseURL}\n`,
+          );
+        } else {
+          throw error;
+        }
+      }
     }
-    ({ exitCode } = await runPlaywright(outputChunks));
+    ({ exitCode } = await runPlaywright(outputChunks, activeBaseURL));
   } finally {
     await stopChildProcess(serverProcess);
   }
@@ -495,6 +707,7 @@ const main = async () => {
         })
         .filter(Boolean),
     }));
+  const coverage = buildCoverage(records);
 
   if (!jsonReport && exitCode !== 0) {
     failedCases.push({
@@ -516,8 +729,11 @@ const main = async () => {
       failed: failedCases.length,
       skipped: skippedCases.length,
     },
+    baseURL: activeBaseURL,
+    reusedServer,
     passedCases: passedCases.map((item) => item.title),
     failedCases,
+    coverage,
   };
 
   const previousFailures =

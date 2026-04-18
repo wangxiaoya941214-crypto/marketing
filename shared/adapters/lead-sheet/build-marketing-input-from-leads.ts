@@ -1,13 +1,14 @@
 import type {
   MarketingInput,
   ProductKey,
-} from "../../marketing-engine";
-import type { OrderConsistencyAudit } from "./audit-order-consistency";
-import type { LeadSheetDetectionResult } from "./detect-lead-sheet";
+} from "../../marketing-engine.ts";
+import type { OrderConsistencyAudit } from "./audit-order-consistency.ts";
+import { getOrderConflictIssue } from "./audit-order-consistency.ts";
+import type { LeadSheetDetectionResult } from "./detect-lead-sheet.ts";
 import {
   isDealLeadRow,
   type NormalizedLeadRow,
-} from "./normalize-lead-row";
+} from "./normalize-lead-row.ts";
 
 export interface LeadSheetAdapterSidecar {
   adapter: "lead-sheet";
@@ -18,6 +19,9 @@ export interface LeadSheetAdapterSidecar {
   detectionConfidence: number;
   matchedSignals: string[];
   missingFields: string[];
+  countedDeals: number;
+  excludedConflictDealCount: number;
+  excludedConflictDealReason: string;
   orderConflictCount: number;
   orderConflictSamples: OrderConsistencyAudit["samples"];
   orderAuditSummary: string;
@@ -105,6 +109,7 @@ export const buildMarketingInputFromLeads = ({
   missingFields = [],
 }: BuildMarketingInputFromLeadsOptions): BuildMarketingInputFromLeadsResult => {
   const periodRange = buildPeriodRange(rows);
+  const conflictRows = rows.filter((row) => Boolean(getOrderConflictIssue(row)));
   const leadsByProduct = countByProduct(rows, () => true);
   const privateDomainByProduct = countByProduct(
     rows,
@@ -114,7 +119,14 @@ export const buildMarketingInputFromLeads = ({
     rows,
     (row) => row.highIntent === "yes",
   );
-  const dealsByProduct = countByProduct(rows, isDealLeadRow);
+  const dealsByProduct = countByProduct(
+    rows,
+    (row) => isDealLeadRow(row) && !getOrderConflictIssue(row),
+  );
+  const conservativeDealCount = rows.filter(
+    (row) => isDealLeadRow(row) && !getOrderConflictIssue(row),
+  ).length;
+  const excludedConflictDealCount = conflictRows.length;
   const unknownBusinessTypeCount = rows.filter(
     (row) => row.businessType === "unknown",
   ).length;
@@ -122,6 +134,12 @@ export const buildMarketingInputFromLeads = ({
     "当前内容分析来自主线索表聚合，不等于真实内容表现。",
     "目标、花费、CPS 红线仍需结合预算表或手动补齐。",
   ];
+
+  if (excludedConflictDealCount > 0) {
+    warnings.push(
+      `有 ${excludedConflictDealCount} 条订单冲突记录，成交漏斗已按保守口径剔除。`,
+    );
+  }
 
   if (unknownBusinessTypeCount > 0) {
     warnings.push(
@@ -135,6 +153,9 @@ export const buildMarketingInputFromLeads = ({
 
   const anomalyNotes = [
     `主线索表已聚合，共识别 ${rows.length} 条线索。`,
+    excludedConflictDealCount > 0
+      ? `其中 ${conservativeDealCount} 条成交按保守口径计入，已剔除 ${excludedConflictDealCount} 条订单口径冲突记录。`
+      : "",
     orderAudit.summary,
     unknownBusinessTypeCount > 0
       ? `其中 ${unknownBusinessTypeCount} 条线索业务类型待确认。`
@@ -164,7 +185,7 @@ export const buildMarketingInputFromLeads = ({
           super: highIntentByProduct.super,
         },
         deals: {
-          total: rows.filter(isDealLeadRow).length,
+          total: conservativeDealCount,
           flexible: dealsByProduct.flexible,
           super: dealsByProduct.super,
         },
@@ -181,6 +202,10 @@ export const buildMarketingInputFromLeads = ({
       detectionConfidence: detection.confidence,
       matchedSignals: detection.matchedSignals,
       missingFields,
+      countedDeals: conservativeDealCount,
+      excludedConflictDealCount,
+      excludedConflictDealReason:
+        "订单口径冲突的记录不会自动计入成交，包括“未下单但带订单信息”和“已下单但缺少订单证据”。",
       orderConflictCount: orderAudit.conflictCount,
       orderConflictSamples: orderAudit.samples,
       orderAuditSummary: orderAudit.summary,

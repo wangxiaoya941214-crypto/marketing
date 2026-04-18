@@ -11,3 +11,16 @@ test-results/
 reports/browser-check/runs/
 reports/browser-check/latest.md
 reports/browser-check/latest.json
+output/
+tmp/
+.vercel
+.env*.local
+*.swp
+*.swo
+api/_lib/server-runtime.mjs
+docs/archive/
+docs/tasks/
+docs/changelog/
+docs/brand-manual.pdf
+brand-manual.pdf
+brand-manual.png

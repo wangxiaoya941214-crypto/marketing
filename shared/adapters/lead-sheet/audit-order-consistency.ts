@@ -1,8 +1,8 @@
 import {
   isDealLeadRow,
   type NormalizedLeadRow,
-} from "./normalize-lead-row";
-import { maskLeadIdentifier } from "./mask-sensitive";
+} from "./normalize-lead-row.ts";
+import { maskLeadIdentifier } from "./mask-sensitive.ts";
 
 export interface OrderConflictSample {
   rowNumber: number;
@@ -24,6 +24,31 @@ export interface OrderConsistencyAudit {
 const buildLeadLabel = (row: NormalizedLeadRow) =>
   maskLeadIdentifier(row.leadName || row.phone || `第 ${row.rowNumber} 行`);
 
+export const getOrderConflictIssue = (row: NormalizedLeadRow) => {
+  const positiveDealSignals = row.dealSignals.filter(
+    (signal) => signal.normalized === "yes",
+  ).length;
+  const negativeDealSignals = row.dealSignals.filter(
+    (signal) => signal.normalized === "no",
+  ).length;
+  const hasDealIdOrDate = Boolean(row.orderId || row.orderDate || row.dealDate);
+  const hasPositiveOrderCount = row.orderCountSignals.some(
+    (signal) => (signal.count || 0) > 0,
+  );
+
+  if (positiveDealSignals > 0 && negativeDealSignals > 0) {
+    return "同一行出现相互冲突的成交状态";
+  }
+  if (row.dealStatus === "no" && (hasDealIdOrDate || hasPositiveOrderCount)) {
+    return "是否下单显示未下单，但存在订单号/下单时间/成交日期/下单数";
+  }
+  if (row.dealStatus === "yes" && !hasDealIdOrDate && !hasPositiveOrderCount) {
+    return "是否下单显示已下单，但缺少订单号/下单时间/成交日期/下单数";
+  }
+
+  return "";
+};
+
 export const auditOrderConsistency = (
   rows: NormalizedLeadRow[],
 ): OrderConsistencyAudit => {
@@ -31,26 +56,8 @@ export const auditOrderConsistency = (
   let manualReviewCount = 0;
 
   rows.forEach((row) => {
-    const positiveDealSignals = row.dealSignals.filter(
-      (signal) => signal.normalized === "yes",
-    ).length;
-    const negativeDealSignals = row.dealSignals.filter(
-      (signal) => signal.normalized === "no",
-    ).length;
-    const hasDealIdOrDate = Boolean(row.orderId || row.orderDate || row.dealDate);
+    const issue = getOrderConflictIssue(row);
     const hasNoOrderReason = Boolean(row.noOrderReason);
-
-    let issue = "";
-
-    if (positiveDealSignals > 0 && negativeDealSignals > 0) {
-      issue = "同一行出现相互冲突的成交状态";
-    } else if (row.dealStatus === "no" && hasDealIdOrDate) {
-      issue = "是否下单显示未下单，但存在订单号/下单时间/成交日期";
-    } else if (row.dealStatus === "yes" && !row.orderId && !row.orderDate) {
-      issue = "是否下单显示已下单，但订单号和下单时间都为空";
-    } else if (row.dealStatus === "yes" && hasNoOrderReason) {
-      issue = "已下单记录仍填写了未下单原因或未成交归因";
-    }
 
     if (issue) {
       samples.push({
@@ -70,7 +77,8 @@ export const auditOrderConsistency = (
       row.needsManualDealReview ||
       (isDealLeadRow(row) && row.businessType === "unknown") ||
       (row.hasStrongIntentSignal && !row.hasExplicitDealEvidence) ||
-      (row.dealStatus === "no" && row.orderProgress)
+      (row.dealStatus === "no" && row.orderProgress) ||
+      (row.dealStatus === "yes" && hasNoOrderReason)
     ) {
       manualReviewCount += 1;
     }

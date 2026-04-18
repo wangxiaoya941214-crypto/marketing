@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { buildAnalyzeResponse } from "../server";
-import { TimeoutError } from "../shared/async-utils";
-import { createEmptyInsightResult } from "../shared/ai-insight-engine";
+import { buildAnalyzeResponse } from "../shared/marketing-api.ts";
+import { TimeoutError } from "../shared/async-utils.ts";
+import { createEmptyInsightResult } from "../shared/ai-insight-engine.ts";
 
 const fixturePath = path.resolve(process.cwd(), "tests/fixtures/daily-smoke.csv");
 

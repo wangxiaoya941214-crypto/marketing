@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useId, useMemo, useState } from "react";
 import {
   ArrowDownRight,
   ArrowUpRight,
@@ -68,28 +68,40 @@ const InputField = ({
   note: string;
   suffix?: string;
   onChange: (value: string) => void;
-}) => (
-  <div className="space-y-2">
-    <label className="block text-[10px] font-black uppercase tracking-[0.18em] text-gray-400">
-      {label}
-    </label>
-    <div className="relative">
-      <input
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={placeholder}
-        inputMode="decimal"
-        className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 pr-14 text-sm font-medium text-gray-900 outline-none transition focus:border-[#08E03B]"
-      />
-      {suffix && (
-        <span className="pointer-events-none absolute inset-y-0 right-4 flex items-center text-sm font-bold text-gray-400">
-          {suffix}
-        </span>
-      )}
+}) => {
+  const inputId = useId();
+  const noteId = `${inputId}-note`;
+
+  return (
+    <div className="space-y-2">
+      <label
+        htmlFor={inputId}
+        className="block text-[10px] font-black uppercase tracking-[0.18em] text-gray-400"
+      >
+        {label}
+      </label>
+      <div className="relative">
+        <input
+          id={inputId}
+          aria-describedby={noteId}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={placeholder}
+          inputMode="decimal"
+          className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 pr-14 text-sm font-medium text-gray-900 outline-none transition focus:border-[#08E03B]"
+        />
+        {suffix && (
+          <span className="pointer-events-none absolute inset-y-0 right-4 flex items-center text-sm font-bold text-gray-400">
+            {suffix}
+          </span>
+        )}
+      </div>
+      <p id={noteId} className="text-xs font-medium leading-5 text-gray-500">
+        {note}
+      </p>
     </div>
-    <p className="text-xs font-medium leading-5 text-gray-500">{note}</p>
-  </div>
-);
+  );
+};
 
 export const PreviousMetricsSection = ({
   previous,
@@ -99,6 +111,9 @@ export const PreviousMetricsSection = ({
   onChange: (patch: Partial<MarketingInput["previous"]>) => void;
 }) => {
   const [expanded, setExpanded] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const helpPanelId = useId();
+  const fieldsPanelId = useId();
 
   return (
     <section className={`${CARD_CLASS} p-8`}>
@@ -107,6 +122,8 @@ export const PreviousMetricsSection = ({
           <button
             type="button"
             onClick={() => setExpanded((current) => !current)}
+            aria-expanded={expanded}
+            aria-controls={fieldsPanelId}
             className="inline-flex items-center gap-3 text-left"
           >
             <span className="text-[10px] font-black uppercase tracking-[0.18em] text-gray-400">
@@ -122,22 +139,36 @@ export const PreviousMetricsSection = ({
           </p>
         </div>
 
-        <div className="group relative w-full max-w-[320px] md:w-auto">
+        <div className="relative w-full max-w-[320px] md:w-auto">
           <button
             type="button"
-            className="inline-flex items-center gap-2 rounded-full border border-gray-200 px-4 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-gray-500 transition hover:border-[#08E03B] hover:text-black"
+            aria-expanded={showHelp}
+            aria-controls={helpPanelId}
+            onClick={() => setShowHelp((current) => !current)}
+            className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-[10px] font-black uppercase tracking-[0.14em] transition ${
+              showHelp
+                ? "border-[#08E03B] bg-[#08E03B]/10 text-black"
+                : "border-gray-200 text-gray-500 hover:border-[#08E03B] hover:text-black"
+            }`}
           >
             <HelpCircle size={14} />
             为什么填这个？
           </button>
-          <div className="pointer-events-none absolute right-0 top-12 z-10 w-72 rounded-2xl border border-gray-100 bg-white px-4 py-4 text-sm font-medium leading-6 text-gray-600 opacity-0 shadow-[0_8px_30px_rgb(0,0,0,0.08)] transition group-hover:opacity-100 group-focus-within:opacity-100">
+          <div
+            id={helpPanelId}
+            role="note"
+            aria-hidden={!showHelp}
+            className={`absolute right-0 top-12 z-10 w-72 rounded-2xl border border-gray-100 bg-white px-4 py-4 text-sm font-medium leading-6 text-gray-600 shadow-[0_8px_30px_rgb(0,0,0,0.08)] transition ${
+              showHelp ? "opacity-100" : "pointer-events-none opacity-0"
+            }`}
+          >
             填写上期数据后，系统将自动生成环比分析，帮你判断本期表现是进步还是退步。
           </div>
         </div>
       </div>
 
       {expanded && (
-        <div className="mt-6 grid grid-cols-1 gap-5 md:grid-cols-2">
+        <div id={fieldsPanelId} className="mt-6 grid grid-cols-1 gap-5 md:grid-cols-2">
           <InputField
             label="上期成交量"
             value={previous.totalDeals === null ? "" : String(previous.totalDeals)}

@@ -1,7 +1,7 @@
 import {
-  buildRecognizeInputResponse,
+  runRecognizeInputRequest,
   type AnalyzeRequestBody,
-} from "../server";
+} from "../shared/api-runtime.ts";
 
 const parseBody = (request: { body?: unknown }) => {
   if (typeof request.body === "string") {
@@ -11,7 +11,7 @@ const parseBody = (request: { body?: unknown }) => {
       return {};
     }
   }
-  return (request.body || {}) as AnalyzeRequestBody;
+  return (request.body || {}) as any;
 };
 
 export const config = {
@@ -33,7 +33,7 @@ export default async function handler(request: any, response: any) {
 
   try {
     const body = parseBody(request);
-    const payload = await buildRecognizeInputResponse(body);
+    const payload = await runRecognizeInputRequest(body as AnalyzeRequestBody);
     response.status(200).json(payload);
   } catch (error: any) {
     console.error(error);

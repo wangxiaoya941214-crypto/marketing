@@ -5,11 +5,29 @@
 # SUPEREV 营销分析助手
 
 这是一个可在本地运行的 `Vite + React + Express + OpenAI-compatible / Gemini / SiliconFlow` 分析工具。
-现在的页面流程是：
 
-1. 首页继续保留“上传 / 粘贴数据”的主入口
-2. 用户点击“数据分析”后，先进入“数据匹配页”确认识别结果
-3. 确认后再生成最终分析报告和可视化看板
+当前版本的对外主口径已经冻结为：
+
+> `闭环分析工作台（首版）`
+
+当前主流程口径已经冻结为：
+
+```text
+统一上传
+-> 后台识别与分析
+-> 进入对应分析页 / 看板
+```
+
+当前需要统一理解的产品边界：
+
+1. `闭环分析` 是当前主方向，也是这版真正要交付的核心能力
+2. `营销诊断` 继续保留，但属于兼容能力，不作为当前首页主产品单独对外讲
+3. `销售跟进诊断`、`投放数据转化诊断`、`内容传播诊断` 已接入统一分流，但当前仍属于兼容链路下的诊断视角，不单独定义为完整独立产品
+
+当前产品在执行层仍包含两类链路：
+
+1. `闭环分析链`：导入工作台 -> 复核队列 -> 闭环分析 -> 经营驾驶舱
+2. `营销诊断兼容链`：识别 -> 数据匹配 -> 分析报告
 
 ## 本地启动
 
@@ -37,7 +55,13 @@
 - 最终分析：`OpenAI(gpt-5.4)` -> `Gemini` -> `SiliconFlow`
 - 图片 / PDF 识别：`OpenAI(gpt-5.4)` -> `Gemini`
 
-## Railway 部署
+## Railway 生产部署（当前主口径）
+
+当前正式生产口径统一按 Railway 执行。  
+当前线上服务：
+
+- `superev-marketing-assistant`
+- 公网域名：`https://superev-marketing-assistant-production.up.railway.app`
 
 线上统一主路径改为云雾 OpenAI 兼容接口：
 
@@ -55,28 +79,56 @@
 
 - `GEMINI_API_KEY=你的 Gemini key`
 - `SILICONFLOW_API_KEY=你的硅基流 key`
+- `DATABASE_URL=你的生产 Postgres`
+- `CLOSED_LOOP_API_TOKEN=闭环接口令牌`
+- `CLOSED_LOOP_REQUIRE_AUTH=0`
+- `CLOSED_LOOP_READ_ROLES=operator,admin`
+- `CLOSED_LOOP_REVIEW_ROLES=operator,admin`
+- `CLOSED_LOOP_WRITE_ROLES=operator,admin`
+- `VITE_CLOSED_LOOP_API_TOKEN=与 CLOSED_LOOP_API_TOKEN 保持一致`
+- `VITE_CLOSED_LOOP_USER_ROLE=operator`
+
+说明：
+
+- 当前 Railway 线上记录的是 `CLOSED_LOOP_REQUIRE_AUTH=0`
+- 只要 `CLOSED_LOOP_API_TOKEN` 已配置，闭环接口仍会继续校验 token 和角色
+- `CLOSED_LOOP_REQUIRE_AUTH=1` 更适合本地 / staging 想在缺少 token 时也强制拦截的场景
 
 线上默认优先级：
 
 - 最终分析：`云雾(claude-sonnet-4-5-20250929-thinking)` -> `Gemini` -> `SiliconFlow`
 - 图片 / PDF 识别：`云雾(claude-sonnet-4-5-20250929-thinking)` -> `Gemini`
- 
-这个项目已经适配 Railway：
 
-- 服务端会优先读取 Railway 注入的 `PORT`
-- 生产启动命令使用 `npm start`
-- 构建命令使用 `npm run build`
-- AI Provider 支持 `YUNWU_API_KEY`、`YUNWU_BASE_URL`、`YUNWU_MODEL`，也兼容 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`
+Railway 线上链路约定：
 
-如果你通过 GitHub 连接 Railway，常用配置就是：
+- 启动命令走 `npm start`
+- 服务端接口由 `server.ts` 承载
+- 生产环境变量统一在 Railway 服务里维护
+- `DATABASE_URL` 是闭环生产链唯一数据库入口
+- 闭环接口鉴权依赖 `CLOSED_LOOP_*` 与 `VITE_CLOSED_LOOP_*`
 
-- Build Command: `npm run build`
-- Start Command: `npm start`
-- Variables:
-  - `YUNWU_API_KEY=你的云雾 key`
-  - `YUNWU_BASE_URL=https://yunwu.ai/v1`
-  - `YUNWU_MODEL=claude-sonnet-4-5-20250929-thinking`
-  - 可选：`GEMINI_API_KEY=你的 Gemini key`
+## Vercel 兼容说明
+
+仓库仍保留 Vercel 所需的 `api/**` 与 `vercel.json`，用于兼容或预览。  
+但当前版本里，Vercel 不作为正式生产口径，也不作为默认验收目标。
+
+## 发版放行标准
+
+重新进入发版评审前，至少同时满足：
+
+1. `npm run release:check`
+2. `npm run lint`
+3. `npm run build`
+4. `node --import tsx --test tests/*.test.ts`
+5. `npx playwright test tests/e2e/closed-loop-v2-entry.spec.ts`
+7. 线上平台口径唯一，且当前版本按 Railway 验收
+
+当前版本先按闭环链路做发版评审；旧模式回归放到下一个统一迭代里再一起收口。
+
+`release:check` 默认只检查当前 release candidate（`HEAD` 与 staged changes）。  
+如果要把本地未暂存改动也纳入审计，执行：
+
+`RELEASE_INCLUDE_WORKTREE=1 npm run release:check`
 
 ## 当前支持的输入
 
@@ -127,3 +179,8 @@
 如果只想直接跑 Playwright，不生成日报：
 
 `npm run test:e2e`
+
+说明：
+
+- 当前 E2E 默认启动生产态 `npm start`
+- 建议先执行一次 `npm run build`，再跑浏览器回归

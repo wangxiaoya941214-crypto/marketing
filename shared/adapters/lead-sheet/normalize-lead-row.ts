@@ -3,7 +3,7 @@ import {
   normalizeHeaderText,
   type LeadSheetDetectionResult,
   type TabularSheet,
-} from "./detect-lead-sheet";
+} from "./detect-lead-sheet.ts";
 
 export type LeadProduct = "flexible" | "super" | "unknown";
 export type LeadFlag = "yes" | "no" | "unknown";
@@ -46,6 +46,7 @@ export interface NormalizedLeadRow {
   hasStrongIntentSignal: boolean;
   hasExplicitDealEvidence: boolean;
   noOrderReason: string;
+  lossAttribution: string;
   dealSignals: LeadFlagSignal[];
   orderCountSignals: LeadCountSignal[];
   needsManualDealReview: boolean;
@@ -186,7 +187,7 @@ const normalizeHighIntent = (value: string) =>
   (() => {
     const raw = normalizeCell(value).toUpperCase();
     if (!raw) return "unknown";
-    if (raw === "A") return "yes";
+    if (raw === "S" || raw === "A") return "yes";
     if (["S", "B", "C", "F", "无"].includes(raw)) return "no";
     return normalizeFlag(
       raw,
@@ -318,8 +319,17 @@ const buildOrderCountSignals = (rawRow: Record<string, string>) =>
       count: parseCount(rawValue),
     }));
 
-export const isDealLeadRow = (row: NormalizedLeadRow) =>
-  row.hasExplicitDealEvidence;
+export const isDealLeadRow = (row: NormalizedLeadRow) => {
+  if (row.dealStatus === "yes") {
+    return row.hasExplicitDealEvidence;
+  }
+
+  if (row.dealStatus === "no") {
+    return false;
+  }
+
+  return row.hasExplicitDealEvidence;
+};
 
 export const normalizeLeadRows = (
   sheets: TabularSheet[],
@@ -417,6 +427,11 @@ export const normalizeLeadRows = (
     const noOrderReason = [
       normalizeCell(normalizedRow[activeDetection.columnMap.noOrderReason ?? -1]),
       getRawValue(normalizedRawRow, ["未下单原因"]),
+    ]
+      .filter(Boolean)
+      .filter((value, index, list) => list.indexOf(value) === index)
+      .join("；");
+    const lossAttribution = [
       getRawValue(normalizedRawRow, ["未成交归因"]),
     ]
       .filter(Boolean)
@@ -433,7 +448,6 @@ export const normalizeLeadRows = (
       return "unknown";
     })();
     const hasExplicitDealEvidence =
-      dealStatus === "yes" ||
       Boolean(orderId) ||
       Boolean(orderDate) ||
       Boolean(dealDate) ||
@@ -483,6 +497,7 @@ export const normalizeLeadRows = (
       hasStrongIntentSignal,
       hasExplicitDealEvidence,
       noOrderReason,
+      lossAttribution,
       dealSignals,
       orderCountSignals,
       needsManualDealReview,

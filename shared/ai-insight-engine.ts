@@ -1,12 +1,12 @@
 import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
-import type { MarketingDashboardData, MarketingInput } from "./marketing-engine";
+import type { MarketingDashboardData, MarketingInput } from "./marketing-engine.ts";
 import {
   clipText,
   isTimeoutError,
   summarizeError,
   withTimeout,
-} from "./async-utils";
+} from "./async-utils.ts";
 
 export type DashboardData = MarketingDashboardData;
 export type NormalizedInput = MarketingInput;

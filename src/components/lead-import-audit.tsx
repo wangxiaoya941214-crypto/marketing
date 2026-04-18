@@ -1,5 +1,11 @@
 import type { LeadSheetAdapterSidecar } from "../../shared/adapters/lead-sheet/build-marketing-input-from-leads";
 import type { RecognitionAudit } from "../../shared/recognition-audit";
+import {
+  LEAD_SHEET_PENDING_METRICS,
+  LEAD_SHEET_REFERENCE_METRICS,
+  LEAD_SHEET_REVIEW_PRIORITIES,
+  LEAD_SHEET_TRUSTED_METRICS,
+} from "../../shared/lead-sheet-mode";
 
 const StatBlock = ({
   label,
@@ -48,6 +54,12 @@ export function LeadImportAuditPanel({
 
       <div className="grid grid-cols-2 gap-4">
         <StatBlock label="识别行数" value={audit.rowCount} />
+        <StatBlock label="自动计入成交" value={audit.countedDeals} />
+        <StatBlock
+          label="保守剔除"
+          value={audit.excludedConflictDealCount}
+          tone={audit.excludedConflictDealCount > 0 ? "danger" : "default"}
+        />
         <StatBlock
           label="表头置信度"
           value={`${Math.round(audit.detectionConfidence * 100)}%`}
@@ -63,11 +75,15 @@ export function LeadImportAuditPanel({
           value={audit.manualReviewDealCount}
           tone={audit.manualReviewDealCount > 0 ? "warn" : "default"}
         />
-        <StatBlock
-          label="缺失字段"
-          value={audit.missingFields.length}
-          tone={audit.missingFields.length > 0 ? "warn" : "default"}
-        />
+      </div>
+
+      <div className="rounded-2xl border border-red-100 bg-red-50 px-4 py-4">
+        <p className="text-[10px] font-black uppercase tracking-[0.16em] text-red-500">
+          保守口径说明
+        </p>
+        <p className="mt-2 text-sm font-medium leading-6 text-red-700">
+          {audit.excludedConflictDealReason}
+        </p>
       </div>
 
       {audit.warnings.map((warning) => (
@@ -89,6 +105,46 @@ export function LeadImportAuditPanel({
           </p>
         </div>
       )}
+
+      <div className="rounded-2xl border border-gray-100 bg-gray-50 px-4 py-4">
+        <p className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">
+          先按这个顺序复核
+        </p>
+        <div className="mt-3 space-y-2">
+          {LEAD_SHEET_REVIEW_PRIORITIES.map((item, index) => (
+            <p key={item} className="text-sm font-medium leading-6 text-gray-700">
+              {index + 1}. {item}
+            </p>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        <div className="rounded-2xl border border-gray-100 bg-gray-50 px-4 py-4">
+          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">
+            这份表适合直接看
+          </p>
+          <p className="mt-2 text-sm font-medium leading-6 text-gray-700">
+            {LEAD_SHEET_TRUSTED_METRICS.join("、")}
+          </p>
+        </div>
+        <div className="rounded-2xl border border-gray-100 bg-gray-50 px-4 py-4">
+          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">
+            当前只能先当参考
+          </p>
+          <p className="mt-2 text-sm font-medium leading-6 text-gray-700">
+            {LEAD_SHEET_REFERENCE_METRICS.join("、")}
+          </p>
+        </div>
+        <div className="rounded-2xl border border-gray-100 bg-gray-50 px-4 py-4">
+          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">
+            当前还要补
+          </p>
+          <p className="mt-2 text-sm font-medium leading-6 text-gray-700">
+            {LEAD_SHEET_PENDING_METRICS.join("、")}
+          </p>
+        </div>
+      </div>
 
       {audit.orderConflictSamples.length > 0 && (
         <div className="rounded-2xl border border-red-100 bg-red-50 px-4 py-4">
@@ -153,6 +209,9 @@ export function RecognitionAuditPanel({
 }: {
   audit: RecognitionAudit;
 }) {
+  const isLeadSheetRecognition =
+    audit.adapterAudit?.sheetType === "lead_detail_sheet";
+
   return (
     <div className="space-y-5">
       <div>
@@ -174,7 +233,7 @@ export function RecognitionAuditPanel({
           tone={CONFIDENCE_TONE[audit.confidence]}
         />
         <StatBlock
-          label="完整度"
+          label={isLeadSheetRecognition ? "识别覆盖" : "完整度"}
           value={`${audit.completenessPercent}%`}
           tone={audit.completenessPercent < 45 ? "danger" : audit.completenessPercent < 75 ? "warn" : "default"}
         />
@@ -189,6 +248,12 @@ export function RecognitionAuditPanel({
           tone={audit.recommendedFocus.length > 0 ? "warn" : "default"}
         />
       </div>
+
+      {isLeadSheetRecognition && (
+        <div className="rounded-2xl bg-gray-50 px-4 py-4 text-sm font-bold leading-6 text-gray-700">
+          这张分数只看表头、关键漏斗和成交风险。目标、花费、CPS 红线已经改到业务补充项，不再因为缺预算字段就把主线索表判成识别失败。
+        </div>
+      )}
 
       {audit.confidence === "low" && (
         <div className="rounded-2xl bg-red-50 px-4 py-4 text-sm font-bold leading-6 text-red-700">

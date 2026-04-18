@@ -1,1230 +1,60 @@
 import path from "path";
 import { pathToFileURL } from "url";
-import dotenv from "dotenv";
-import { GoogleGenAI } from "@google/genai";
-import OpenAI from "openai";
-import mammoth from "mammoth";
-import * as XLSX from "xlsx";
 import {
-  appendInsightsToReportPrompt,
-  createEmptyInsightResult,
-  generateInsights,
-} from "./shared/ai-insight-engine";
-import {
-  isTimeoutError,
-  summarizeError,
-  withTimeout,
-} from "./shared/async-utils";
-import { auditOrderConsistency } from "./shared/adapters/lead-sheet/audit-order-consistency";
-import {
-  buildMarketingInputFromLeads,
-  type LeadSheetAdapterSidecar,
-} from "./shared/adapters/lead-sheet/build-marketing-input-from-leads";
-import {
-  detectLeadSheet,
-  type TabularSheet,
-} from "./shared/adapters/lead-sheet/detect-lead-sheet";
-import { normalizeLeadRows } from "./shared/adapters/lead-sheet/normalize-lead-row";
-import {
-  analyzeMarketingInput,
-  auditMarketingInput,
-  buildAiPrompt,
-  createEmptyInput,
-  mergeMarketingInput,
-  parseMarketingInputText,
-  parseTemplateCsv,
-  type MarketingInput,
-} from "./shared/marketing-engine";
+  applyClosedLoopReviewDecision,
+  getClosedLoopReviewQueue,
+  getClosedLoopReviewWorkspaceData,
+  getClosedLoopSnapshot,
+  importClosedLoopWorkbook,
+  listClosedLoopJobs,
+  searchClosedLoopReviewCandidates,
+} from "./shared/closed-loop/service.ts";
 import type {
-  RecognitionAudit,
-  RecognitionConfidence,
-  RecognitionExtractor,
-  RecognitionSourceType,
-} from "./shared/recognition-audit";
-
-dotenv.config({ path: ".env.local", override: true });
-dotenv.config();
-
-const IS_PRODUCTION = process.env.NODE_ENV === "production";
-const DEFAULT_LOCAL_OPENAI_MODEL = "gpt-5.4";
-const DEFAULT_PRODUCTION_OPENAI_MODEL = "claude-sonnet-4-5-20250929-thinking";
-const DEFAULT_PRODUCTION_OPENAI_BASE_URL = "https://yunwu.ai/v1";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-const SILICONFLOW_BASE_URL = process.env.SILICONFLOW_BASE_URL || "https://api.siliconflow.cn/v1";
-const SILICONFLOW_MODEL = process.env.SILICONFLOW_MODEL || "Qwen/Qwen3.5-397B-A17B";
-const readEnv = (value?: string) => value?.trim() || undefined;
-const OPENAI_API_KEY = IS_PRODUCTION
-  ? readEnv(process.env.YUNWU_API_KEY) || readEnv(process.env.OPENAI_API_KEY)
-  : readEnv(process.env.OPENAI_API_KEY);
-const OPENAI_MODEL = IS_PRODUCTION
-  ? readEnv(process.env.YUNWU_MODEL) ||
-    readEnv(process.env.OPENAI_MODEL) ||
-    DEFAULT_PRODUCTION_OPENAI_MODEL
-  : readEnv(process.env.OPENAI_MODEL) || DEFAULT_LOCAL_OPENAI_MODEL;
-const OPENAI_BASE_URL = IS_PRODUCTION
-  ? readEnv(process.env.YUNWU_BASE_URL) ||
-    readEnv(process.env.OPENAI_BASE_URL) ||
-    DEFAULT_PRODUCTION_OPENAI_BASE_URL
-  : readEnv(process.env.OPENAI_BASE_URL);
-const AI_INSIGHTS_TIMEOUT_MS = Number(process.env.AI_INSIGHTS_TIMEOUT_MS) || 12_000;
-const AI_REPORT_TIMEOUT_MS = Number(process.env.AI_REPORT_TIMEOUT_MS) || 30_000;
-
-const createOpenAiClient = () =>
-  new OpenAI({
-    apiKey: OPENAI_API_KEY,
-    baseURL: OPENAI_BASE_URL,
-  });
-
-export type UploadedFileInfo = {
-  name?: string;
-  mimeType?: string;
-  data?: string;
-};
-
-export type AnalyzeRequestBody = {
-  input?: MarketingInput;
-  rawText?: string;
-  fileInfo?: UploadedFileInfo;
-};
-
-type ParsedUploadResult = {
-  patch: Partial<MarketingInput>;
-  rawText: string;
-  sidecar?: LeadSheetAdapterSidecar;
-};
-
-type RecognizedIntakeResult = {
-  patch: Partial<MarketingInput>;
-  rawText: string;
-  mode: string;
-  sidecar?: LeadSheetAdapterSidecar;
-  recognitionAudit?: RecognitionAudit;
-};
-
-type AnalyzeResponsePayload = {
-  analysis: string;
-  dashboard: ReturnType<typeof analyzeMarketingInput>["dashboard"];
-  normalizedInput: MarketingInput;
-  insights: ReturnType<typeof createEmptyInsightResult>;
-  engineMode: string;
-};
-
-type AnalyzeResponseDependencies = {
-  generateInsightsImpl?: typeof generateInsights;
-  generateAiEnhancedReportImpl?: typeof generateAiEnhancedReport;
-};
-
-const roundDuration = (startedAt: number) =>
-  Math.round((globalThis.performance?.now?.() ?? Date.now()) - startedAt);
-
-const createRequestTimer = (requestId: string) => {
-  const requestStartedAt = globalThis.performance?.now?.() ?? Date.now();
-
-  return {
-    logStage: (
-      stage: string,
-      startedAt: number,
-      status: "success" | "error" | "timeout" | "fallback",
-      details: Record<string, unknown> = {},
-    ) => {
-      console.info(
-        "[api/analyze]",
-        JSON.stringify({
-          requestId,
-          stage,
-          status,
-          durationMs: roundDuration(startedAt),
-          ...details,
-        }),
-      );
-    },
-    logTotal: (engineMode: string) => {
-      console.info(
-        "[api/analyze]",
-        JSON.stringify({
-          requestId,
-          stage: "total",
-          status: "success",
-          durationMs: roundDuration(requestStartedAt),
-          engineMode,
-        }),
-      );
-    },
-  };
-};
-
-const buildRecognitionPrompt = () => `
-你是一个营销数据识别助手。
-请从用户上传的截图、PDF、图片、文档或 Excel 导出的表格内容中识别 SUPEREV 营销分析所需字段，并且只返回 JSON，不要加解释。
-
-总原则：
-1. 只提取文件中明确出现的数据，不能估算、不能反推、不能脑补。
-2. 如果数值看不清、单位不明确、归属不明确，数字填 null；文本填 ""。
-3. 优先识别表格和带表头区域；同一页如果既有表格又有文字说明，数值以表格为准，说明归到 notes 类字段。
-4. 不要根据总数反推 flexible/super，也不要根据分项相加反推 total。
-5. 如果只看到总数，没有明确产品拆分，就只填 total，flexible/super 保持 null。
-6. product 字段只能填 "flexible"、"super" 或 ""；如果文件里出现“灵活订阅”“超级订阅”相关内容，请按产品拆分。
-7. 同义词映射：
-   - 留资 / 客资 / 线索 -> leads
-   - 转私域 / 加微 / 加微信 / 私域沉淀 -> privateDomain
-   - 高意向 / 强意向 / A类意向 -> highIntent
-   - 成交 / 签单 / 成单 / 交车 -> deals
-8. contents 里每个内容对象，只保留真正识别到的条目。没有 name、link、creativeSummary 且没有关键数值的内容不要保留。
-9. 如果两条内容的 name 和 link 都相同，视为同一条；同名但没有 link 时，只有文件里明确是同一素材才合并。
-10. creativeNotes 只放素材/创意/卖点说明；anomalyNotes 只放异常说明；benchmarkLinks 只放优秀案例或参考链接。
-11. previous 是上期数据（选填）。如果文件中出现“上期 / 上月 / 前一周期”相关指标，请按字段填写。
-12. 百分比字段如果原文写“5%”，请在 JSON 里填 5。
-
-JSON 结构：
-{
-  "periodStart": "",
-  "periodEnd": "",
-  "targets": {
-    "flexible": null,
-    "super": null
-  },
-  "cpsRedlines": {
-    "flexible": null,
-    "super": null
-  },
-  "spend": {
-    "flexible": null,
-    "super": null,
-    "brand": null,
-    "total": null
-  },
-  "funnel": {
-    "leads": { "total": null, "flexible": null, "super": null },
-    "privateDomain": { "total": null, "flexible": null, "super": null },
-    "highIntent": { "total": null, "flexible": null, "super": null },
-    "deals": { "total": null, "flexible": null, "super": null }
-  },
-  "contents": [
-    {
-      "name": "",
-      "link": "",
-      "product": "",
-      "board": "",
-      "views": null,
-      "intentComments": null,
-      "privateMessages": null,
-      "leads": null,
-      "spend": null,
-      "highIntent": null,
-      "deals": null,
-      "creativeSummary": ""
-    }
-  ],
-  "previous": {
-    "totalDeals": null,
-    "flexibleDeals": null,
-    "superDeals": null,
-    "overallCps": null,
-    "flexibleCps": null,
-    "superCps": null,
-    "cpl": null,
-    "overallConversionRate": null,
-    "totalSpend": null
-  },
-  "creativeNotes": "",
-  "anomalyNotes": "",
-  "benchmarkLinks": "",
-  "rawInput": ""
-}
-`;
-
-const isWordDocument = (fileInfo: UploadedFileInfo) =>
-  fileInfo.mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-  fileInfo.name?.toLowerCase().endsWith(".docx");
-
-const isTextLikeMimeType = (mimeType: string) =>
-  mimeType.startsWith("text/") ||
-  mimeType === "application/json" ||
-  mimeType === "application/csv" ||
-  mimeType === "text/csv";
-
-const isCsvFile = (fileInfo: UploadedFileInfo) =>
-  fileInfo.mimeType === "text/csv" ||
-  fileInfo.mimeType === "application/csv" ||
-  fileInfo.name?.toLowerCase().endsWith(".csv");
-
-const isExcelFile = (fileInfo: UploadedFileInfo) =>
-  fileInfo.mimeType === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
-  fileInfo.mimeType === "application/vnd.ms-excel" ||
-  fileInfo.name?.toLowerCase().endsWith(".xlsx") ||
-  fileInfo.name?.toLowerCase().endsWith(".xls");
-
-const isPdfFile = (fileInfo: UploadedFileInfo) =>
-  fileInfo.mimeType === "application/pdf" ||
-  fileInfo.name?.toLowerCase().endsWith(".pdf");
-
-const isImageFile = (fileInfo: UploadedFileInfo) =>
-  fileInfo.mimeType?.startsWith("image/") || /\.(png|jpe?g|webp|bmp|gif)$/i.test(fileInfo.name || "");
-
-const readWorkbookSheets = (buffer: Buffer): TabularSheet[] => {
-  const workbook = XLSX.read(buffer, {
-    type: "buffer",
-    cellDates: true,
-  });
-
-  return workbook.SheetNames.map((sheetName) => {
-    const worksheet = workbook.Sheets[sheetName];
-    const rows = XLSX.utils
-      .sheet_to_json<unknown[]>(worksheet, {
-        header: 1,
-        raw: false,
-        defval: "",
-      })
-      .map((row) => row.map((cell) => String(cell ?? "").trim()));
-
-    return {
-      name: sheetName,
-      rows,
-    };
-  });
-};
-
-const buildWorkbookRawText = (sheets: TabularSheet[]) =>
-  sheets
-    .map((sheet) => {
-      const visibleRows = sheet.rows.slice(0, 400);
-      const lines = visibleRows.map((row) => row.join("\t")).join("\n");
-      const suffix =
-        sheet.rows.length > visibleRows.length
-          ? `\n... 其余 ${sheet.rows.length - visibleRows.length} 行已省略`
-          : "";
-      return `### Sheet: ${sheet.name}\n${lines}${suffix}`;
-    })
-    .join("\n\n");
-
-export async function parseUploadedFile(
-  fileInfo?: UploadedFileInfo,
-): Promise<ParsedUploadResult> {
-  if (!fileInfo?.data) {
-    return { patch: {}, rawText: "" };
-  }
-
-  const mimeType = fileInfo.mimeType || "application/octet-stream";
-  const buffer = Buffer.from(fileInfo.data, "base64");
-
-  if (isWordDocument(fileInfo)) {
-    const result = await mammoth.extractRawText({ buffer });
-    return {
-      patch: parseMarketingInputText(result.value),
-      rawText: result.value,
-    };
-  }
-
-  if (isCsvFile(fileInfo)) {
-    const text = buffer.toString("utf8");
-    return {
-      patch: parseTemplateCsv(text),
-      rawText: text,
-    };
-  }
-
-  if (isExcelFile(fileInfo)) {
-    const sheets = readWorkbookSheets(buffer);
-    const rawText = buildWorkbookRawText(sheets);
-    const detection = detectLeadSheet(sheets);
-
-    if (detection.kind === "lead_detail_sheet") {
-      const normalized = normalizeLeadRows(sheets, detection);
-      const orderAudit = auditOrderConsistency(normalized.rows);
-      const built = buildMarketingInputFromLeads({
-        detection,
-        rows: normalized.rows,
-        rawText,
-        orderAudit,
-        missingFields: normalized.missingFields,
-      });
-
-      return {
-        patch: built.input,
-        rawText,
-        sidecar: built.sidecar,
-      };
-    }
-
-    return {
-      patch: parseMarketingInputText(rawText),
-      rawText,
-    };
-  }
-
-  if (isTextLikeMimeType(mimeType)) {
-    const text = buffer.toString("utf8");
-    return {
-      patch: parseMarketingInputText(text),
-      rawText: text,
-    };
-  }
-
-  throw new Error("新版分析引擎建议上传模板文本、CSV 或 Word(.docx) 文件。图片/PDF 请先整理成模板数据后再导入。");
-}
-
-const safeJsonParse = (text: string) => {
-  try {
-    return JSON.parse(text);
-  } catch {
-    const fenced = text.match(/```json\s*([\s\S]*?)```/i) || text.match(/```([\s\S]*?)```/i);
-    if (fenced?.[1]) {
-      return JSON.parse(fenced[1]);
-    }
-    throw new Error("识别结果不是有效 JSON。");
-  }
-};
-
-const isStructuredSourceType = (sourceType: RecognitionSourceType) =>
-  sourceType !== "image" && sourceType !== "pdf";
-
-const getRecognitionSourceType = (body: AnalyzeRequestBody): RecognitionSourceType => {
-  if (body.fileInfo?.data) {
-    if (isCsvFile(body.fileInfo)) return "csv";
-    if (isExcelFile(body.fileInfo)) return "xlsx";
-    if (isWordDocument(body.fileInfo)) return "docx";
-    if (isPdfFile(body.fileInfo)) return "pdf";
-    if (isImageFile(body.fileInfo)) return "image";
-    return "text";
-  }
-  return "rawText";
-};
-
-const buildRecognitionTextPrompt = (text: string, sourceType: RecognitionSourceType) => `
-${buildRecognitionPrompt()}
-
-【当前识别来源】
-${sourceType}
-
-【待识别内容】
-${text}
-`;
-
-const stripSignalPrefix = (value: string) =>
-  value.replace(/^[⚠️🚨⛔📌💡]+\s*/u, "").trim();
-
-const hasRecognitionAiProvider = () => Boolean(OPENAI_API_KEY || process.env.GEMINI_API_KEY);
-
-const hasMeaningfulContentIdentity = (content: MarketingInput["contents"][number]) =>
-  Boolean(content.name.trim() || content.link.trim() || content.creativeSummary.trim());
-
-const normalizeIdentity = (value: string) => value.trim().toLowerCase();
-
-const fillMissingText = (current: string, incoming: string) => current.trim() || !incoming.trim() ? current : incoming;
-
-const fillMissingNumber = (
-  current: number | null,
-  incoming: number | null,
-) => (current === null && incoming !== null ? incoming : current);
-
-const fillMissingContentFields = (
-  current: MarketingInput["contents"][number],
-  incoming: MarketingInput["contents"][number],
-) => {
-  current.name = fillMissingText(current.name, incoming.name);
-  current.link = fillMissingText(current.link, incoming.link);
-  current.product = current.product || incoming.product;
-  current.board = fillMissingText(current.board, incoming.board);
-  current.views = fillMissingNumber(current.views, incoming.views);
-  current.intentComments = fillMissingNumber(current.intentComments, incoming.intentComments);
-  current.privateMessages = fillMissingNumber(current.privateMessages, incoming.privateMessages);
-  current.leads = fillMissingNumber(current.leads, incoming.leads);
-  current.spend = fillMissingNumber(current.spend, incoming.spend);
-  current.highIntent = fillMissingNumber(current.highIntent, incoming.highIntent);
-  current.deals = fillMissingNumber(current.deals, incoming.deals);
-  current.creativeSummary = fillMissingText(current.creativeSummary, incoming.creativeSummary);
-};
-
-const mergeRuleFirstWithAiPatch = (
-  ruleInput: MarketingInput,
-  aiPatch: Partial<MarketingInput>,
-  options?: { lockLeadSheetCore?: boolean },
-) => {
-  const next = mergeMarketingInput(createEmptyInput(), ruleInput);
-  const aiInput = mergeMarketingInput(createEmptyInput(), aiPatch);
-  const lockLeadSheetCore = Boolean(options?.lockLeadSheetCore);
-
-  if (!lockLeadSheetCore) {
-    next.periodStart = fillMissingText(next.periodStart, aiInput.periodStart);
-    next.periodEnd = fillMissingText(next.periodEnd, aiInput.periodEnd);
-    next.funnel = {
-      leads: {
-        total: fillMissingNumber(next.funnel.leads.total, aiInput.funnel.leads.total),
-        flexible: fillMissingNumber(next.funnel.leads.flexible, aiInput.funnel.leads.flexible),
-        super: fillMissingNumber(next.funnel.leads.super, aiInput.funnel.leads.super),
-      },
-      privateDomain: {
-        total: fillMissingNumber(next.funnel.privateDomain.total, aiInput.funnel.privateDomain.total),
-        flexible: fillMissingNumber(next.funnel.privateDomain.flexible, aiInput.funnel.privateDomain.flexible),
-        super: fillMissingNumber(next.funnel.privateDomain.super, aiInput.funnel.privateDomain.super),
-      },
-      highIntent: {
-        total: fillMissingNumber(next.funnel.highIntent.total, aiInput.funnel.highIntent.total),
-        flexible: fillMissingNumber(next.funnel.highIntent.flexible, aiInput.funnel.highIntent.flexible),
-        super: fillMissingNumber(next.funnel.highIntent.super, aiInput.funnel.highIntent.super),
-      },
-      deals: {
-        total: fillMissingNumber(next.funnel.deals.total, aiInput.funnel.deals.total),
-        flexible: fillMissingNumber(next.funnel.deals.flexible, aiInput.funnel.deals.flexible),
-        super: fillMissingNumber(next.funnel.deals.super, aiInput.funnel.deals.super),
-      },
-    };
-  }
-
-  next.targets = {
-    flexible: fillMissingNumber(next.targets.flexible, aiInput.targets.flexible),
-    super: fillMissingNumber(next.targets.super, aiInput.targets.super),
-  };
-  next.cpsRedlines = {
-    flexible: fillMissingNumber(next.cpsRedlines.flexible, aiInput.cpsRedlines.flexible),
-    super: fillMissingNumber(next.cpsRedlines.super, aiInput.cpsRedlines.super),
-  };
-  next.spend = {
-    flexible: fillMissingNumber(next.spend.flexible, aiInput.spend.flexible),
-    super: fillMissingNumber(next.spend.super, aiInput.spend.super),
-    brand: fillMissingNumber(next.spend.brand, aiInput.spend.brand),
-    total: fillMissingNumber(next.spend.total, aiInput.spend.total),
-  };
-  next.previous = {
-    totalDeals: fillMissingNumber(next.previous.totalDeals, aiInput.previous.totalDeals),
-    flexibleDeals: fillMissingNumber(next.previous.flexibleDeals, aiInput.previous.flexibleDeals),
-    superDeals: fillMissingNumber(next.previous.superDeals, aiInput.previous.superDeals),
-    overallCps: fillMissingNumber(next.previous.overallCps, aiInput.previous.overallCps),
-    flexibleCps: fillMissingNumber(next.previous.flexibleCps, aiInput.previous.flexibleCps),
-    superCps: fillMissingNumber(next.previous.superCps, aiInput.previous.superCps),
-    cpl: fillMissingNumber(next.previous.cpl, aiInput.previous.cpl),
-    overallConversionRate: fillMissingNumber(
-      next.previous.overallConversionRate,
-      aiInput.previous.overallConversionRate,
-    ),
-    totalSpend: fillMissingNumber(next.previous.totalSpend, aiInput.previous.totalSpend),
-  };
-  next.creativeNotes = fillMissingText(next.creativeNotes, aiInput.creativeNotes);
-  next.anomalyNotes = fillMissingText(next.anomalyNotes, aiInput.anomalyNotes);
-  next.benchmarkLinks = fillMissingText(next.benchmarkLinks, aiInput.benchmarkLinks);
-
-  const mergedContents = [...next.contents];
-  aiInput.contents
-    .filter(hasMeaningfulContentIdentity)
-    .forEach((incoming) => {
-      const targetIndex = mergedContents.findIndex((current) => {
-        const sameNameLink =
-          normalizeIdentity(current.name) &&
-          normalizeIdentity(current.link) &&
-          normalizeIdentity(current.name) === normalizeIdentity(incoming.name) &&
-          normalizeIdentity(current.link) === normalizeIdentity(incoming.link);
-        const sameLink =
-          normalizeIdentity(current.link) &&
-          normalizeIdentity(current.link) === normalizeIdentity(incoming.link);
-        return Boolean(sameNameLink || sameLink);
-      });
-
-      if (targetIndex >= 0) {
-        fillMissingContentFields(mergedContents[targetIndex], incoming);
-        return;
-      }
-
-      mergedContents.push(incoming);
-    });
-
-  next.contents = mergedContents;
-  next.rawInput = ruleInput.rawInput;
-
-  return mergeMarketingInput(createEmptyInput(), next);
-};
-
-const hasValidContentRows = (input: MarketingInput) =>
-  input.contents.some((content) =>
-    Boolean(
-      content.name ||
-        content.link ||
-        content.creativeSummary ||
-        content.leads !== null ||
-        content.spend !== null ||
-        content.highIntent !== null ||
-        content.deals !== null,
-    ),
-  );
-
-const hasCoreFunnelData = (input: MarketingInput) =>
-  [
-    input.funnel.leads.total,
-    input.funnel.privateDomain.total,
-    input.funnel.highIntent.total,
-    input.funnel.deals.total,
-  ].some((value) => value !== null);
-
-const hasPreviousMetrics = (input: MarketingInput) =>
-  Object.values(input.previous).some((value) => value !== null);
-
-const deriveRecognitionConfidence = (
-  sourceType: RecognitionSourceType,
-  input: MarketingInput,
-  sidecar?: LeadSheetAdapterSidecar,
-) => {
-  const audit = auditMarketingInput(input);
-
-  if (sourceType === "xlsx" && sidecar?.sheetType === "lead_detail_sheet") {
-    if (
-      sidecar.detectionConfidence >= 0.85 &&
-      sidecar.missingFields.length === 0 &&
-      sidecar.orderConflictCount === 0 &&
-      sidecar.manualReviewDealCount === 0
-    ) {
-      return "high" as const;
-    }
-
-    if (
-      sidecar.detectionConfidence < 0.7 ||
-      sidecar.orderConflictCount > 0 ||
-      sidecar.manualReviewDealCount > 0 ||
-      sidecar.missingFields.length > 0
-    ) {
-      return "low" as const;
-    }
-
-    return "medium" as const;
-  }
-
-  if (sourceType === "csv") {
-    if (audit.completenessPercent >= 85 && audit.anomalies.length === 0) {
-      return "high" as const;
-    }
-    if (audit.completenessPercent < 65 || audit.anomalies.length > 0) {
-      return "low" as const;
-    }
-    return "medium" as const;
-  }
-
-  if (sourceType === "image" || sourceType === "pdf") {
-    if (audit.completenessPercent >= 75 && audit.anomalies.length === 0 && audit.warnings.length === 0) {
-      return "high" as const;
-    }
-    if (audit.completenessPercent < 45 || audit.anomalies.length > 0) {
-      return "low" as const;
-    }
-    return "medium" as const;
-  }
-
-  if (audit.completenessPercent >= 75 && (hasCoreFunnelData(input) || hasValidContentRows(input))) {
-    return "high" as const;
-  }
-  if (
-    audit.completenessPercent < 45 ||
-    (!hasCoreFunnelData(input) && !hasValidContentRows(input))
-  ) {
-    return "low" as const;
-  }
-  return "medium" as const;
-};
-
-const buildRecognitionAudit = (options: {
-  sourceType: RecognitionSourceType;
-  extractor: RecognitionExtractor;
-  input: MarketingInput;
-  fallbackUsed: boolean;
-  sidecar?: LeadSheetAdapterSidecar;
-  extraReasons?: string[];
-}) => {
-  const { sourceType, extractor, input, fallbackUsed, sidecar, extraReasons = [] } = options;
-  const audit = auditMarketingInput(input);
-  const confidence = deriveRecognitionConfidence(sourceType, input, sidecar);
-  const reviewReasons: string[] = [];
-  const recommendedFocus: string[] = [];
-
-  if (fallbackUsed) {
-    reviewReasons.push("规则抽取置信度偏低，已启用 AI 补全空白字段。");
-  }
-
-  if (sourceType === "xlsx" && sidecar?.sheetType === "lead_detail_sheet") {
-    if (sidecar.detectionConfidence < 0.85) {
-      reviewReasons.push(`表头识别置信度 ${Math.round(sidecar.detectionConfidence * 100)}%。`);
-    }
-    if (sidecar.missingFields.length > 0) {
-      reviewReasons.push(`主线索表缺少字段：${sidecar.missingFields.join("、")}。`);
-      recommendedFocus.push(...sidecar.missingFields.slice(0, 3));
-    }
-    if (sidecar.orderConflictCount > 0) {
-      reviewReasons.push(`存在 ${sidecar.orderConflictCount} 条订单冲突样本。`);
-      recommendedFocus.push("订单冲突样本");
-    }
-    if (sidecar.manualReviewDealCount > 0) {
-      reviewReasons.push(`有 ${sidecar.manualReviewDealCount} 条成交需要人工确认。`);
-      recommendedFocus.push("人工确认成交");
-    }
-  }
-
-  if (sourceType === "xlsx" && !sidecar) {
-    reviewReasons.push("工作簿未识别为标准主线索表，当前按文本规则读取。");
-    recommendedFocus.push("工作表结构");
-  }
-
-  if (audit.completenessPercent < 85) {
-    reviewReasons.push(`字段完整度 ${audit.completenessPercent}%。`);
-  }
-
-  reviewReasons.push(...audit.warnings.map(stripSignalPrefix));
-  reviewReasons.push(...audit.anomalies.map(stripSignalPrefix));
-  reviewReasons.push(...extraReasons);
-
-  recommendedFocus.push(...audit.missingFields.slice(0, 3));
-
-  if (!hasValidContentRows(input)) {
-    recommendedFocus.push("内容条目");
+  AnalyzeRequestBody,
+  UploadedFileInfo,
+} from "./shared/http-contracts.ts";
+import { ensureClosedLoopApiAccess } from "./api/_lib/closed-loop-auth.ts";
+import {
+  runAnalyzeRequest,
+  runRecognizeInputRequest,
+} from "./shared/api-runtime.ts";
+import { buildIntakeAnalysisResponse } from "./shared/routing/intake-api.ts";
+import {
+  analyzeV2UploadSession,
+  buildV2AnalyzeResponse,
+  buildV2BuildSessionResponse,
+  buildV2ReclassifyResponse,
+  buildV2UploadResponse,
+  buildV2AnalysisSession,
+  getV2Dashboard,
+  listV2Snapshots,
+  reclassifyV2UploadFile,
+  uploadV2Files,
+} from "./shared/v2/service.ts";
+import type { V2DashboardType, V2SourceType } from "./shared/v2/types.ts";
+import { resetV2StoreForTests } from "./shared/v2/store.ts";
+import { buildIntakeExecutionResponse } from "./shared/routing/intake-execute.ts";
+import type { IntakeExecuteRequestBody } from "./shared/routing/types.ts";
+import { analyzeV2Agent, followupV2Agent } from "./api/_lib/v2-agent-service.ts";
+
+const resolveDashboardErrorMessage = (error: any) => {
+  const message = typeof error?.message === "string" ? error.message.trim() : "";
+  const statusCode =
+    typeof error?.statusCode === "number" ? Number(error.statusCode) : 500;
+
+  if (statusCode < 500 && message) {
+    return message;
   }
 
   if (
-    input.funnel.privateDomain.total !== null &&
-    (input.funnel.privateDomain.flexible === null || input.funnel.privateDomain.super === null)
+    message.includes("Cannot read properties") ||
+    message.includes("Unexpected token") ||
+    message.includes("summary")
   ) {
-    recommendedFocus.push("分产品拆分");
+    return "当前快照数据不完整，请重新生成分析会话。";
   }
 
-  if (audit.warnings.some((item) => item.includes("样本量不足"))) {
-    recommendedFocus.push("样本量");
-  }
-
-  if (!hasPreviousMetrics(input)) {
-    recommendedFocus.push("上期数据");
-  }
-
-  const uniqueReasons = [...new Set(reviewReasons.filter(Boolean))].slice(0, 6);
-  const uniqueFocus = [...new Set(recommendedFocus.filter(Boolean))].slice(0, 5);
-
-  return {
-    extractor,
-    sourceType,
-    confidence,
-    completenessPercent: audit.completenessPercent,
-    fallbackUsed,
-    reviewReasons: uniqueReasons,
-    recommendedFocus: uniqueFocus,
-    adapterAudit: sidecar || null,
-  } satisfies RecognitionAudit;
-};
-
-async function recognizeTextWithAi(
-  text: string,
-  sourceType: RecognitionSourceType,
-): Promise<RecognizedIntakeResult> {
-  const prompt = buildRecognitionTextPrompt(text, sourceType);
-
-  const tryOpenAiRecognition = async () => {
-    const openai = createOpenAiClient();
-    const response = await openai.chat.completions.create({
-      model: OPENAI_MODEL,
-      messages: [{ role: "user", content: prompt }],
-    });
-    const responseText = response.choices[0]?.message?.content?.trim();
-    if (!responseText) {
-      throw new Error("OpenAI 没有返回识别结果。");
-    }
-    return {
-      patch: safeJsonParse(responseText) as Partial<MarketingInput>,
-      rawText: responseText,
-      mode: `AI补全（${OPENAI_MODEL}）`,
-      sidecar: undefined,
-    };
-  };
-
-  const tryGeminiRecognition = async () => {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: [{ text: prompt }],
-      config: {
-        responseMimeType: "application/json",
-      } as any,
-    });
-    const responseText = response.text?.trim();
-    if (!responseText) {
-      throw new Error("Gemini 没有返回识别结果。");
-    }
-    return {
-      patch: safeJsonParse(responseText) as Partial<MarketingInput>,
-      rawText: responseText,
-      mode: `AI补全（${GEMINI_MODEL}）`,
-      sidecar: undefined,
-    };
-  };
-
-  let lastError: unknown = null;
-
-  if (OPENAI_API_KEY) {
-    try {
-      return await tryOpenAiRecognition();
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  if (process.env.GEMINI_API_KEY) {
-    try {
-      return await tryGeminiRecognition();
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  if (lastError) {
-    throw lastError;
-  }
-
-  throw new Error("当前没有可用的 AI 补全模型。");
-}
-
-async function recognizeUploadedFileWithAi(
-  fileInfo: UploadedFileInfo,
-): Promise<RecognizedIntakeResult> {
-  const mimeType = fileInfo.mimeType || "application/octet-stream";
-
-  const tryOpenAiRecognition = async () => {
-    const openai = createOpenAiClient();
-    const response = await openai.chat.completions.create({
-      model: OPENAI_MODEL,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: buildRecognitionPrompt() },
-            {
-              type: "input_file",
-              file_data: `data:${mimeType};base64,${fileInfo.data}`,
-              filename: fileInfo.name || "upload",
-            } as any,
-          ] as any,
-        },
-      ],
-    });
-
-    const text = response.choices[0]?.message?.content?.trim();
-    if (!text) {
-      throw new Error("OpenAI 没有返回识别结果。");
-    }
-
-    return {
-      patch: safeJsonParse(text) as Partial<MarketingInput>,
-      rawText: text,
-      mode: `AI识别（${OPENAI_MODEL}）`,
-      sidecar: undefined,
-    };
-  };
-
-  const tryGeminiRecognition = async () => {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    const parts: any[] = [{ text: buildRecognitionPrompt() }];
-    parts.push({
-      inlineData: {
-        data: fileInfo.data,
-        mimeType,
-      },
-    });
-
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: { parts },
-      config: {
-        responseMimeType: "application/json",
-      } as any,
-    });
-
-    const text = response.text?.trim();
-    if (!text) {
-      throw new Error("Gemini 没有返回识别结果。");
-    }
-
-    return {
-      patch: safeJsonParse(text) as Partial<MarketingInput>,
-      rawText: text,
-      mode: `AI识别（${GEMINI_MODEL}）`,
-      sidecar: undefined,
-    };
-  };
-
-  let lastError: unknown = null;
-
-  if (OPENAI_API_KEY) {
-    try {
-      return await tryOpenAiRecognition();
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  if (process.env.GEMINI_API_KEY) {
-    try {
-      return await tryGeminiRecognition();
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  if (lastError) {
-    throw lastError;
-  }
-
-  throw new Error(
-    IS_PRODUCTION
-      ? "图片 / PDF 智能识别目前需要先配置 YUNWU_API_KEY（或 OPENAI_API_KEY）或 GEMINI_API_KEY。"
-      : "图片 / PDF 智能识别目前需要先配置 OPENAI_API_KEY 或 GEMINI_API_KEY。",
-  );
-}
-
-export async function recognizeIntake(body: AnalyzeRequestBody): Promise<RecognizedIntakeResult> {
-  if (body.fileInfo?.data) {
-    const mimeType = body.fileInfo.mimeType || "application/octet-stream";
-    if (
-      isWordDocument(body.fileInfo) ||
-      isCsvFile(body.fileInfo) ||
-      isExcelFile(body.fileInfo) ||
-      isTextLikeMimeType(mimeType)
-    ) {
-      const parsed = await parseUploadedFile(body.fileInfo);
-      return {
-        patch: parsed.patch,
-        rawText: parsed.rawText,
-        sidecar: parsed.sidecar,
-        mode: (() => {
-          if (parsed.sidecar?.sheetType === "lead_detail_sheet") {
-            return "主线索表识别（XLSX）";
-          }
-          if (isCsvFile(body.fileInfo)) {
-            return "模板识别（CSV）";
-          }
-          if (isExcelFile(body.fileInfo)) {
-            return "工作簿读取（XLSX）";
-          }
-          return "规则识别";
-        })(),
-      };
-    }
-    return recognizeUploadedFileWithAi(body.fileInfo);
-  }
-
-  if (body.rawText?.trim()) {
-    return {
-      patch: parseMarketingInputText(body.rawText),
-      rawText: body.rawText,
-      mode: "规则识别",
-      sidecar: undefined,
-    };
-  }
-
-  return {
-    patch: {},
-    rawText: "",
-    mode: "无识别输入",
-    sidecar: undefined,
-  };
-}
-
-async function generateAiEnhancedReport(prompt: string, signal?: AbortSignal) {
-  const tryOpenAiReport = async () => {
-    const openai = createOpenAiClient();
-    const response = await openai.chat.completions.create(
-      {
-        model: OPENAI_MODEL,
-        messages: [{ role: "user", content: prompt }],
-      },
-      signal ? { signal } : undefined,
-    );
-    const text = response.choices[0]?.message?.content?.trim();
-    if (text && text.includes("模块一") && text.includes("模块六")) {
-      return {
-        mode: `AI增强（${OPENAI_MODEL}）`,
-        report: text,
-      };
-    }
-    throw new Error("OpenAI 返回内容不完整。");
-  };
-
-  const tryGeminiReport = async () => {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: [{ text: prompt }],
-    });
-    const text = response.text?.trim();
-    if (text && text.includes("模块一") && text.includes("模块六")) {
-      return {
-        mode: `AI增强（${GEMINI_MODEL}）`,
-        report: text,
-      };
-    }
-    throw new Error("Gemini 返回内容不完整。");
-  };
-
-  const trySiliconFlowReport = async () => {
-    const siliconflow = new OpenAI({
-      apiKey: process.env.SILICONFLOW_API_KEY,
-      baseURL: SILICONFLOW_BASE_URL,
-    });
-    const response = await siliconflow.chat.completions.create(
-      {
-        model: SILICONFLOW_MODEL,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.2,
-      },
-      signal ? { signal } : undefined,
-    );
-    const text = response.choices[0]?.message?.content?.trim();
-    if (text && text.includes("模块一") && text.includes("模块六")) {
-      return {
-        mode: `AI增强（${SILICONFLOW_MODEL} @ SiliconFlow）`,
-        report: text,
-      };
-    }
-    throw new Error("SiliconFlow 返回内容不完整。");
-  };
-
-  let lastError: unknown = null;
-
-  if (OPENAI_API_KEY) {
-    try {
-      return await tryOpenAiReport();
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  if (process.env.GEMINI_API_KEY) {
-    try {
-      return await tryGeminiReport();
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  if (process.env.SILICONFLOW_API_KEY) {
-    try {
-      return await trySiliconFlowReport();
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  if (lastError) {
-    throw lastError;
-  }
-
-  return null;
-}
-
-export const buildRecognizeInputResponse = async (body: AnalyzeRequestBody) => {
-  const sourceType = getRecognitionSourceType(body);
-  const recognized = await recognizeIntake(body);
-  let merged = createEmptyInput();
-  merged = mergeMarketingInput(merged, recognized.patch);
-  if (body.input) {
-    merged = mergeMarketingInput(merged, body.input);
-  }
-  merged.rawInput = [recognized.rawText, body.rawText, body.input?.rawInput]
-    .filter(Boolean)
-    .join("\n\n");
-
-  const ruleResult = analyzeMarketingInput(merged);
-  let finalResult = ruleResult;
-  let finalMode = recognized.mode;
-  let finalAudit = buildRecognitionAudit({
-    sourceType,
-    extractor: isStructuredSourceType(sourceType) ? "rule" : "ai_primary",
-    input: ruleResult.normalizedInput,
-    fallbackUsed: false,
-    sidecar: recognized.sidecar,
-  });
-  const lowStructuredConfidence =
-    isStructuredSourceType(sourceType) && finalAudit.confidence === "low";
-
-  if (lowStructuredConfidence && recognized.rawText.trim() && hasRecognitionAiProvider()) {
-    try {
-      const aiRecognition = await recognizeTextWithAi(recognized.rawText, sourceType);
-      const mergedWithAi = mergeRuleFirstWithAiPatch(ruleResult.normalizedInput, aiRecognition.patch, {
-        lockLeadSheetCore: recognized.sidecar?.sheetType === "lead_detail_sheet",
-      });
-      mergedWithAi.rawInput = merged.rawInput;
-      finalResult = analyzeMarketingInput(mergedWithAi);
-      finalMode = `${recognized.mode} + AI补全`;
-      finalAudit = buildRecognitionAudit({
-        sourceType,
-        extractor: "rule_then_ai",
-        input: finalResult.normalizedInput,
-        fallbackUsed: true,
-        sidecar: recognized.sidecar,
-      });
-    } catch (error) {
-      console.error("AI fallback failed, keeping rule-first recognition:", error);
-      finalAudit = buildRecognitionAudit({
-        sourceType,
-        extractor: "rule",
-        input: ruleResult.normalizedInput,
-        fallbackUsed: false,
-        sidecar: recognized.sidecar,
-        extraReasons: ["AI 补全未成功，当前保留规则抽取结果。"],
-      });
-    }
-  } else if (lowStructuredConfidence && !recognized.rawText.trim()) {
-    finalAudit = buildRecognitionAudit({
-      sourceType,
-      extractor: "rule",
-      input: ruleResult.normalizedInput,
-      fallbackUsed: false,
-      sidecar: recognized.sidecar,
-      extraReasons: ["规则结果缺少可送入 AI 的文本内容，当前保留规则抽取结果。"],
-    });
-  } else if (lowStructuredConfidence && !hasRecognitionAiProvider()) {
-    finalAudit = buildRecognitionAudit({
-      sourceType,
-      extractor: "rule",
-      input: ruleResult.normalizedInput,
-      fallbackUsed: false,
-      sidecar: recognized.sidecar,
-      extraReasons: ["当前没有可用的 AI 补全模型，系统未执行兜底补全。"],
-    });
-  }
-
-  return {
-    recognizedInput: finalResult.normalizedInput,
-    dashboardPreview: finalResult.dashboard,
-    recognitionMode: finalMode,
-    importAudit: recognized.sidecar || null,
-    recognitionAudit: finalAudit,
-  };
-};
-
-export const buildAnalyzeResponse = async (
-  body: AnalyzeRequestBody,
-  dependencies: AnalyzeResponseDependencies = {},
-): Promise<AnalyzeResponsePayload> => {
-  const requestId = `analyze-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const timer = createRequestTimer(requestId);
-  const generateInsightsImpl = dependencies.generateInsightsImpl || generateInsights;
-  const generateAiEnhancedReportImpl =
-    dependencies.generateAiEnhancedReportImpl || generateAiEnhancedReport;
-
-  const parseStartedAt = globalThis.performance?.now?.() ?? Date.now();
-  let merged = createEmptyInput();
-  try {
-    const parsedFile = await parseUploadedFile(body.fileInfo);
-    const parsedRawText = body.rawText ? parseMarketingInputText(body.rawText) : {};
-
-    merged = mergeMarketingInput(merged, parsedFile.patch);
-    merged = mergeMarketingInput(merged, parsedRawText);
-    if (body.input) {
-      merged = mergeMarketingInput(merged, body.input);
-    }
-
-    merged.rawInput = [parsedFile.rawText, body.rawText, body.input?.rawInput]
-      .filter(Boolean)
-      .join("\n\n");
-    timer.logStage("parse_input", parseStartedAt, "success");
-  } catch (error) {
-    timer.logStage("parse_input", parseStartedAt, "error", {
-      reason: summarizeError(error),
-    });
-    throw error;
-  }
-
-  const analyzeStartedAt = globalThis.performance?.now?.() ?? Date.now();
-  let result: ReturnType<typeof analyzeMarketingInput>;
-  try {
-    result = analyzeMarketingInput(merged);
-    timer.logStage("analyze_marketing_input", analyzeStartedAt, "success");
-  } catch (error) {
-    timer.logStage("analyze_marketing_input", analyzeStartedAt, "error", {
-      reason: summarizeError(error),
-    });
-    throw error;
-  }
-
-  let insights = createEmptyInsightResult();
-  let insightTimeout = false;
-  const insightStartedAt = globalThis.performance?.now?.() ?? Date.now();
-
-  try {
-    insights = await generateInsightsImpl(result.dashboard, result.normalizedInput, {
-      requestId,
-      timeoutMs: AI_INSIGHTS_TIMEOUT_MS,
-    } as Parameters<typeof generateInsights>[2]);
-    timer.logStage("generate_insights", insightStartedAt, "success", {
-      topFindings: insights.topFindings.length,
-      anomalies: insights.anomalies.length,
-      opportunities: insights.opportunities.length,
-      risks: insights.risks.length,
-    });
-  } catch (error) {
-    insightTimeout = isTimeoutError(error);
-    timer.logStage(
-      "generate_insights",
-      insightStartedAt,
-      insightTimeout ? "timeout" : "fallback",
-      {
-        fallback: "empty_insights",
-        reason: summarizeError(error),
-      },
-    );
-  }
-
-  let analysis = result.fallbackReport;
-  let engineMode = "规则保底引擎";
-  let reportTimeout = false;
-  const reportStartedAt = globalThis.performance?.now?.() ?? Date.now();
-
-  try {
-    const aiResult = await withTimeout(
-      "generateAiEnhancedReport",
-      AI_REPORT_TIMEOUT_MS,
-      (signal) =>
-        generateAiEnhancedReportImpl(
-          appendInsightsToReportPrompt(buildAiPrompt(result), insights),
-          signal,
-        ),
-    );
-
-    if (aiResult) {
-      analysis = aiResult.report;
-      engineMode = insightTimeout ? `${aiResult.mode}（洞察超时降级）` : aiResult.mode;
-      timer.logStage("generate_ai_enhanced_report", reportStartedAt, "success", {
-        engineMode,
-      });
-    } else {
-      engineMode = insightTimeout ? "规则保底引擎（洞察超时降级）" : engineMode;
-      timer.logStage("generate_ai_enhanced_report", reportStartedAt, "fallback", {
-        fallback: "fallback_report",
-        reason: "no_ai_provider",
-        engineMode,
-      });
-    }
-  } catch (error) {
-    reportTimeout = isTimeoutError(error);
-    engineMode = reportTimeout
-      ? insightTimeout
-        ? "规则保底引擎（AI超时降级）"
-        : "规则保底引擎（AI增强超时降级）"
-      : insightTimeout
-        ? "规则保底引擎（洞察超时降级）"
-        : "规则保底引擎";
-
-    timer.logStage(
-      "generate_ai_enhanced_report",
-      reportStartedAt,
-      reportTimeout ? "timeout" : "fallback",
-      {
-        fallback: "fallback_report",
-        reason: summarizeError(error),
-        engineMode,
-      },
-    );
-  }
-
-  timer.logTotal(engineMode);
-
-  return {
-    analysis,
-    dashboard: result.dashboard,
-    normalizedInput: result.normalizedInput,
-    insights,
-    engineMode,
-  };
+  return "读取 V2 看板失败，请刷新后重试。";
 };
 
 export async function startServer() {
@@ -1232,22 +62,23 @@ export async function startServer() {
     await Promise.all([import("express"), import("vite")]);
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
+  const HOST = process.env.HOST || "0.0.0.0";
 
   app.use(express.json({ limit: "50mb" }));
 
-  app.use((err: any, req: any, res: any, next: any) => {
+  app.use((err: any, _req: any, res: any, next: any) => {
     if (err.type === "entity.too.large") {
       res.status(413).json({ error: "请求体过大，请减少上传内容后重试。" });
-    } else {
-      next(err);
+      return;
     }
+    next(err);
   });
 
   app.post("/api/analyze", async (req, res) => {
     const body = (req.body || {}) as AnalyzeRequestBody;
 
     try {
-      res.json(await buildAnalyzeResponse(body));
+      res.json(await runAnalyzeRequest(body));
     } catch (error: any) {
       console.error(error);
       res.status(500).json({
@@ -1260,11 +91,363 @@ export async function startServer() {
     const body = (req.body || {}) as AnalyzeRequestBody;
 
     try {
-      res.json(await buildRecognizeInputResponse(body));
+      res.json(await runRecognizeInputRequest(body));
     } catch (error: any) {
       console.error(error);
       res.status(500).json({
         error: error.message || "文件识别失败，请换一个文件格式或改用手动补录。",
+      });
+    }
+  });
+
+  app.post("/api/intake/analyze", async (req, res) => {
+    const body = (req.body || {}) as AnalyzeRequestBody & { uploadId?: string };
+
+    try {
+      if (body.uploadId) {
+        const upload = await analyzeV2UploadSession(body.uploadId);
+        res.json(buildV2AnalyzeResponse(upload));
+        return;
+      }
+      res.json(await buildIntakeAnalysisResponse(body));
+    } catch (error: any) {
+      console.error(error);
+      res.status(500).json({
+        error: error.message || "统一入口识别失败，请稍后重试。",
+      });
+    }
+  });
+
+  app.post("/api/intake/execute", async (req, res) => {
+    const body = (req.body || {}) as IntakeExecuteRequestBody;
+
+    try {
+      res.json(await buildIntakeExecutionResponse(body));
+    } catch (error: any) {
+      console.error(error);
+      res.status(error?.statusCode || 500).json({
+        error: error.message || "统一入口执行失败，请稍后重试。",
+      });
+    }
+  });
+
+  app.post("/api/intake/upload", async (req, res) => {
+    try {
+      const files = Array.isArray(req.body?.files)
+        ? (req.body.files as UploadedFileInfo[])
+        : [];
+      if (!files.length) {
+        res.status(400).json({ error: "至少上传一个文件。" });
+        return;
+      }
+      const upload = await uploadV2Files(files);
+      res.json(buildV2UploadResponse(upload));
+    } catch (error: any) {
+      console.error(error);
+      res.status(error?.statusCode || 500).json({
+        error: error.message || "创建上传会话失败。",
+      });
+    }
+  });
+
+  if (process.env.V2_FORCE_MEMORY_STORE === "1") {
+    app.post("/api/test/reset-v2", async (_req, res) => {
+      try {
+        await resetV2StoreForTests();
+        res.json({ ok: true });
+      } catch (error: any) {
+        console.error(error);
+        res.status(500).json({
+          error: error.message || "重置 V2 测试状态失败。",
+        });
+      }
+    });
+  }
+
+  app.post("/api/intake/reclassify", async (req, res) => {
+    try {
+      const body = (req.body || {}) as {
+        uploadId?: string;
+        fileId?: string;
+        sourceType?: V2SourceType | null;
+      };
+      if (!body.uploadId || !body.fileId) {
+        res.status(400).json({ error: "缺少 uploadId 或 fileId。" });
+        return;
+      }
+      const upload = await reclassifyV2UploadFile(
+        body.uploadId,
+        body.fileId,
+        body.sourceType ?? null,
+      );
+      res.json(
+        buildV2ReclassifyResponse(upload, body.fileId, body.sourceType ?? null),
+      );
+    } catch (error: any) {
+      console.error(error);
+      res.status(error?.statusCode || 500).json({
+        error: error.message || "人工修正文件类型失败。",
+      });
+    }
+  });
+
+  app.post("/api/intake/build-session", async (req, res) => {
+    try {
+      const body = (req.body || {}) as {
+        uploadId?: string;
+      };
+      if (!body.uploadId) {
+        res.status(400).json({ error: "缺少 uploadId。" });
+        return;
+      }
+      const payload = await buildV2AnalysisSession(body.uploadId);
+      res.json(buildV2BuildSessionResponse(payload));
+    } catch (error: any) {
+      console.error(error);
+      res.status(error?.statusCode || 500).json({
+        error: error.message || "构建 V2 分析会话失败。",
+      });
+    }
+  });
+
+  app.get("/api/snapshot/list", async (_req, res) => {
+    try {
+      res.json({
+        snapshots: await listV2Snapshots(),
+      });
+    } catch (error: any) {
+      console.error(error);
+      res.status(error?.statusCode || 500).json({
+        error: error.message || "读取 V2 快照列表失败。",
+      });
+    }
+  });
+
+  const dashboardRouteMap: Record<string, V2DashboardType> = {
+    "/api/dashboard/overview": "overview",
+    "/api/dashboard/content": "content",
+    "/api/dashboard/ads": "ads",
+    "/api/dashboard/sales": "sales",
+    "/api/dashboard/super-subscription": "super_subscription",
+    "/api/dashboard/flexible-subscription": "flexible_subscription",
+  };
+
+  Object.entries(dashboardRouteMap).forEach(([route, dashboardType]) => {
+    app.get(route, async (req, res) => {
+      try {
+        const snapshotId = String(req.query?.snapshotId || "").trim();
+        const timeScope = String(req.query?.timeScope || "").trim() || undefined;
+        const businessFilter =
+          String(req.query?.businessFilter || "").trim() || undefined;
+        if (!snapshotId) {
+          res.status(400).json({ error: "缺少 snapshotId。" });
+          return;
+        }
+        res.json(
+          await getV2Dashboard(snapshotId, dashboardType, {
+            timeScope,
+            businessFilter,
+          }),
+        );
+      } catch (error: any) {
+        console.error(error);
+        res.status(error?.statusCode || 500).json({
+          error: resolveDashboardErrorMessage(error),
+        });
+      }
+    });
+  });
+
+  app.post("/api/agent/analyze", async (req, res) => {
+    try {
+      const body = (req.body || {}) as {
+        snapshotId?: string;
+        dashboardType?: V2DashboardType;
+      };
+      if (!body.snapshotId || !body.dashboardType) {
+        res.status(400).json({ error: "缺少 snapshotId 或 dashboardType。" });
+        return;
+      }
+      res.json(await analyzeV2Agent(body.snapshotId, body.dashboardType));
+    } catch (error: any) {
+      console.error(error);
+      res.status(error?.statusCode || 500).json({
+        error: error.message || "运行 V2 Agent 失败。",
+      });
+    }
+  });
+
+  app.post("/api/agent/followup", async (req, res) => {
+    try {
+      const body = (req.body || {}) as {
+        sessionId?: string;
+        userQuestion?: string;
+      };
+      if (!body.sessionId || !body.userQuestion?.trim()) {
+        res.status(400).json({ error: "缺少 sessionId 或追问内容。" });
+        return;
+      }
+      res.json(await followupV2Agent(body.sessionId, body.userQuestion.trim()));
+    } catch (error: any) {
+      console.error(error);
+      res.status(error?.statusCode || 500).json({
+        error: error.message || "继续追问失败。",
+      });
+    }
+  });
+
+  app.post("/api/closed-loop/import", async (req, res) => {
+    if (!ensureClosedLoopApiAccess(req, res, "write")) {
+      return;
+    }
+
+    try {
+      const fileInfo = req.body?.fileInfo as UploadedFileInfo | undefined;
+      if (!fileInfo?.data) {
+        res.status(400).json({ error: "缺少闭环底座文件。" });
+        return;
+      }
+
+      res.json(
+        await importClosedLoopWorkbook({
+          fileName: fileInfo.name || "closed-loop-workbook.xlsx",
+          buffer: Buffer.from(fileInfo.data, "base64"),
+        }),
+      );
+    } catch (error: any) {
+      console.error(error);
+      res.status(error?.statusCode || 500).json({
+        error: error.message || "闭环底座导入失败。",
+      });
+    }
+  });
+
+  app.get("/api/closed-loop/jobs", async (_req, res) => {
+    if (!ensureClosedLoopApiAccess(_req, res, "read")) {
+      return;
+    }
+
+    try {
+      res.json({ jobs: await listClosedLoopJobs() });
+    } catch (error: any) {
+      console.error(error);
+      res.status(error?.statusCode || 500).json({
+        error: error.message || "读取导入任务失败。",
+      });
+    }
+  });
+
+  app.get("/api/closed-loop/review-queue", async (req, res) => {
+    if (!ensureClosedLoopApiAccess(req, res, "review")) {
+      return;
+    }
+
+    try {
+      const importJobId = String(req.query.importJobId || "").trim();
+      const filters = {
+        query: String(req.query.q || "").trim() || undefined,
+        businessType: (String(req.query.businessType || "").trim() ||
+          undefined) as
+          | "flexible"
+          | "super"
+          | "unknown"
+          | "all"
+          | undefined,
+      };
+      if (!importJobId) {
+        res.status(400).json({ error: "缺少 importJobId。" });
+        return;
+      }
+      res.json(await getClosedLoopReviewWorkspaceData(importJobId, filters));
+    } catch (error: any) {
+      console.error(error);
+      res.status(error?.statusCode || 500).json({
+        error: error.message || "读取待复核队列失败。",
+      });
+    }
+  });
+
+  app.get("/api/closed-loop/review-search", async (req, res) => {
+    if (!ensureClosedLoopApiAccess(req, res, "review")) {
+      return;
+    }
+
+    try {
+      const importJobId = String(req.query.importJobId || "").trim();
+      const query = String(req.query.q || "").trim();
+      if (!importJobId) {
+        res.status(400).json({ error: "缺少 importJobId。" });
+        return;
+      }
+      if (!query) {
+        res.json({ candidates: [] });
+        return;
+      }
+      res.json({
+        candidates: await searchClosedLoopReviewCandidates(importJobId, query),
+      });
+    } catch (error: any) {
+      console.error(error);
+      res.status(error?.statusCode || 500).json({
+        error: error.message || "搜索候选主线索失败。",
+      });
+    }
+  });
+
+  app.post("/api/closed-loop/review-decision", async (req, res) => {
+    if (!ensureClosedLoopApiAccess(req, res, "review")) {
+      return;
+    }
+
+    try {
+      const body = (req.body || {}) as {
+        importJobId?: string;
+        xhsLeadId?: string;
+        decisionType?: "confirm_match" | "change_match" | "mark_unmatched" | "override_field";
+        actor?: string;
+        note?: string;
+        nextCrmLeadId?: string | null;
+      };
+
+      if (!body.importJobId || !body.xhsLeadId || !body.decisionType) {
+        res.status(400).json({ error: "缺少复核参数。" });
+        return;
+      }
+
+      res.json(
+        await applyClosedLoopReviewDecision({
+          importJobId: body.importJobId,
+          xhsLeadId: body.xhsLeadId,
+          decisionType: body.decisionType,
+          actor: body.actor,
+          note: body.note,
+          nextCrmLeadId: body.nextCrmLeadId,
+        }),
+      );
+    } catch (error: any) {
+      console.error(error);
+      res.status(error?.statusCode || 500).json({
+        error: error.message || "复核写入失败。",
+      });
+    }
+  });
+
+  app.get("/api/closed-loop/snapshot", async (req, res) => {
+    if (!ensureClosedLoopApiAccess(req, res, "read")) {
+      return;
+    }
+
+    try {
+      const importJobId = String(req.query.importJobId || "").trim();
+      if (!importJobId) {
+        res.status(400).json({ error: "缺少 importJobId。" });
+        return;
+      }
+      res.json({ snapshot: await getClosedLoopSnapshot(importJobId) });
+    } catch (error: any) {
+      console.error(error);
+      res.status(error?.statusCode || 500).json({
+        error: error.message || "读取闭环分析快照失败。",
       });
     }
   });
@@ -1283,7 +466,7 @@ export async function startServer() {
     });
   }
 
-  const server = app.listen(PORT, "0.0.0.0", (error?: Error) => {
+  const server = app.listen(PORT, HOST, (error?: Error) => {
     if (error) {
       throw error;
     }
@@ -1298,6 +481,16 @@ const isDirectExecution =
   Boolean(process.argv[1]) &&
   pathToFileURL(process.argv[1]).href === import.meta.url;
 
+const loadLocalDotenv = async () => {
+  const dotenvModuleName = "dotenv";
+  const dotenv = await import(dotenvModuleName);
+  dotenv.config({ path: ".env.local", override: true });
+  dotenv.config();
+};
+
 if (isDirectExecution) {
-  startServer();
+  void (async () => {
+    await loadLocalDotenv();
+    await startServer();
+  })();
 }

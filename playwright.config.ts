@@ -1,8 +1,11 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const port = process.env.PLAYWRIGHT_PORT || "3101";
-const baseURL = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${port}`;
-const browserChannel = process.env.PLAYWRIGHT_BROWSER_CHANNEL || "chrome";
+const baseURL =
+  process.env.PLAYWRIGHT_BASE_URL ||
+  process.env.APP_URL ||
+  `http://127.0.0.1:${port}`;
+const browserChannel = process.env.PLAYWRIGHT_BROWSER_CHANNEL;
 
 const config = defineConfig({
   testDir: "./tests/e2e",
@@ -42,7 +45,7 @@ const config = defineConfig({
       name: "chromium",
       use: {
         ...devices["Desktop Chrome"],
-        channel: browserChannel,
+        ...(browserChannel ? { channel: browserChannel } : {}),
       },
     },
   ],
@@ -50,7 +53,7 @@ const config = defineConfig({
 
 if (!process.env.PLAYWRIGHT_DISABLE_WEB_SERVER) {
   config.webServer = {
-    command: process.env.PLAYWRIGHT_WEB_SERVER_COMMAND || `env PORT=${port} node --import tsx server.ts`,
+    command: process.env.PLAYWRIGHT_WEB_SERVER_COMMAND || `env PORT=${port} npm start`,
     url: baseURL,
     timeout: 120_000,
     reuseExistingServer: !process.env.CI,
