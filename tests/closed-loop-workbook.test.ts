@@ -6,6 +6,7 @@ import { parseClosedLoopWorkbook } from "../shared/closed-loop/workbook.ts";
 const buildWorkbookBuffer = (options?: {
   omitSheets?: string[];
   breakCrmHeader?: boolean;
+  useContactKeyAliases?: boolean;
 }) => {
   const workbook = XLSX.utils.book_new();
   const omitSheets = new Set(options?.omitSheets || []);
@@ -80,26 +81,48 @@ const buildWorkbookBuffer = (options?: {
     XLSX.utils.book_append_sheet(
       workbook,
       XLSX.utils.json_to_sheet([
-        {
-          小红书线索ID: "X001",
-          用户小红书昵称: "测试用户",
-          线索生成时间: "2026-03-31 10:00:00",
-          归属账号: "超级电动",
-          来源笔记: "测试笔记",
-          流量类型: "广告流量",
-          创意名称: "3月24日获客号-超级订阅萤火虫",
-          创意名称标准化: "3月24日获客号-超级订阅萤火虫",
-          转化方式: "私信留资",
-          手机号: "13800000000",
-          微信号: "wechat001",
-          联络主键: "13800000000",
-          地区: "上海市",
-          匹配状态: "已匹配",
-          匹配主键: "13800000000",
-          匹配时间差天: 0,
-          匹配置信度: "低置信待核查",
-          主线索ID: "M001",
-        },
+        options?.useContactKeyAliases
+          ? {
+              小红书线索ID: "X001",
+              用户小红书昵称: "测试用户",
+              线索生成时间: "2026-03-31 10:00:00",
+              归属账号: "超级电动",
+              来源笔记: "测试笔记",
+              流量类型: "广告流量",
+              创意名称: "3月24日获客号-超级订阅萤火虫",
+              创意名称标准化: "3月24日获客号-超级订阅萤火虫",
+              转化方式: "私信留资",
+              手机号: "13800000000",
+              微信号: "wechat001",
+              手机号_key: "13800000000",
+              微信号_key: "wechat001",
+              地区: "上海市",
+              匹配状态: "已匹配",
+              匹配主键: "13800000000",
+              匹配时间差天: 0,
+              匹配置信度: "低置信待核查",
+              主线索ID: "M001",
+            }
+          : {
+              小红书线索ID: "X001",
+              用户小红书昵称: "测试用户",
+              线索生成时间: "2026-03-31 10:00:00",
+              归属账号: "超级电动",
+              来源笔记: "测试笔记",
+              流量类型: "广告流量",
+              创意名称: "3月24日获客号-超级订阅萤火虫",
+              创意名称标准化: "3月24日获客号-超级订阅萤火虫",
+              转化方式: "私信留资",
+              手机号: "13800000000",
+              微信号: "wechat001",
+              联络主键: "13800000000",
+              地区: "上海市",
+              匹配状态: "已匹配",
+              匹配主键: "13800000000",
+              匹配时间差天: 0,
+              匹配置信度: "低置信待核查",
+              主线索ID: "M001",
+            },
       ]),
       "XHS线索明细_打通",
     );
@@ -252,4 +275,14 @@ test("闭环底座缺少关键表头时会直接失败", () => {
       ),
     /工作表 统一主线索底座 缺少必要字段：主线索ID/,
   );
+});
+
+test("闭环底座允许用 手机号_key / 微信号_key 代替 联络主键", () => {
+  const bundle = parseClosedLoopWorkbook(
+    buildWorkbookBuffer({ useContactKeyAliases: true }),
+    "job-1",
+  );
+
+  assert.equal(bundle.xhsLeads.length, 1);
+  assert.equal(bundle.xhsLeads[0]?.contactKey, "13800000000");
 });

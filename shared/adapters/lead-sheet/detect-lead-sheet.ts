@@ -8,6 +8,7 @@ export type LeadSheetColumnKey =
   | "channel"
   | "channelDetail"
   | "businessType"
+  | "city"
   | "leadName"
   | "wechatId"
   | "phone"
@@ -67,6 +68,7 @@ const DEAL_KEYS: LeadSheetColumnKey[] = [
 ];
 
 const OPTIONAL_BOOST_KEYS: LeadSheetColumnKey[] = [
+  "city",
   "leadName",
   "wechatId",
   "phone",
@@ -91,6 +93,8 @@ const HEADER_RULES: Record<LeadSheetColumnKey, HeaderRule> = {
     label: "来源渠道",
     patterns: [
       /^(来源)?渠道$/,
+      /^用户来源$/,
+      /^客户来源$/,
       /^线索来源$/,
       /^来源平台$/,
       /^投放平台$/,
@@ -119,6 +123,15 @@ const HEADER_RULES: Record<LeadSheetColumnKey, HeaderRule> = {
       /^订阅类型$/,
       /^业务归属$/,
       /^车型业务$/,
+    ],
+  },
+  city: {
+    label: "用车城市",
+    patterns: [
+      /^用车城市$/,
+      /^城市$/,
+      /^地区$/,
+      /^所在城市$/,
     ],
   },
   leadName: {
@@ -173,6 +186,7 @@ const HEADER_RULES: Record<LeadSheetColumnKey, HeaderRule> = {
       /^是否成功加微$/,
       /^是否成功加微信$/,
       /^是否成功添加微信$/,
+      /^是否添加成功微信$/,
       /^加微结果$/,
       /^加微是否成功$/,
       /^加微$/,
@@ -331,6 +345,7 @@ const buildCandidate = (
   const columnCount = header.filter(Boolean).length || header.length;
   const matchedCount = matchedSignals.length;
   const hasSheetNameHint = /主线索/.test(sheet.name);
+  const hasBusinessTypeHint = /超级|灵活/.test(sheet.name);
   const confidence = Number(
     Math.min(
       1,
@@ -339,12 +354,21 @@ const buildCandidate = (
         Math.min(dealMatched / 2, 1) * 0.2 +
         Math.min(optionalMatched / OPTIONAL_BOOST_KEYS.length, 1) * 0.1 +
         Math.min(columnCount / 41, 1) * 0.05 +
-        (hasSheetNameHint ? 0.05 : 0),
+        (hasSheetNameHint ? 0.05 : 0) +
+        (hasBusinessTypeHint ? 0.05 : 0),
     ).toFixed(2),
   );
+  const basicSatisfied =
+    basicMatched === REQUIRED_BASIC_KEYS.length ||
+    (basicMatched === REQUIRED_BASIC_KEYS.length - 1 &&
+      !("businessType" in columnMap) &&
+      hasBusinessTypeHint);
+  const intentSatisfied =
+    highIntentMatched >= 1 ||
+    (hasBusinessTypeHint && dealMatched >= 1);
   const isLeadSheet =
-    basicMatched === REQUIRED_BASIC_KEYS.length &&
-    highIntentMatched >= 1 &&
+    basicSatisfied &&
+    intentSatisfied &&
     dealMatched >= 1 &&
     columnCount >= 12 &&
     dataRows >= 3;
@@ -369,6 +393,7 @@ const buildCandidate = (
       dealMatched * 50 +
       optionalMatched * 20 +
       (hasSheetNameHint ? 80 : 0) +
+      (hasBusinessTypeHint ? 60 : 0) +
       Math.min(dataRows, 100) +
       Math.min(columnCount, 60),
   };

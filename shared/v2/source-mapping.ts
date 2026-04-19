@@ -38,6 +38,13 @@ const ORDER_SOURCE_HEADERS = [
   "来源核查",
   "归因渠道",
 ] as const;
+const ORDER_SOURCE_FALLBACK_HEADERS = [
+  "订单号",
+  "下单时间",
+  "手机号",
+  "平台来源",
+  "用车城市",
+] as const;
 
 const normalizeCell = (value: unknown) =>
   String(value ?? "")
@@ -102,6 +109,10 @@ const detectDirectV2Source = (fileInfo: UploadedFileInfo): DetectionMatch | null
 
   try {
     const sheets = readTabularSheets(fileInfo);
+    const leadSheetDetection = detectLeadSheet(sheets);
+    if (sheets.length > 1 && leadSheetDetection.kind === "lead_detail_sheet") {
+      return null;
+    }
     const bestVideo = sheets
       .map((sheet) => ({
         name: sheet.name,
@@ -144,12 +155,35 @@ const detectDirectV2Source = (fileInfo: UploadedFileInfo): DetectionMatch | null
         ...bestHeaderMatch(sheet.rows, ORDER_SOURCE_HEADERS),
       }))
       .sort((left, right) => right.matched - left.matched)[0];
+    const bestOrderFallback = sheets
+      .map((sheet) => ({
+        name: sheet.name,
+        ...bestHeaderMatch(sheet.rows, ORDER_SOURCE_FALLBACK_HEADERS),
+      }))
+      .sort((left, right) => right.matched - left.matched)[0];
+    const looksLikeOrderAuditFile =
+      /订单来源|来源核查/i.test(fileInfo.name || "") ||
+      /订单来源|来源核查/i.test(bestOrder?.name || "") ||
+      /订单来源|来源核查/i.test(bestOrderFallback?.name || "");
+
     if (bestOrder?.matched >= 2) {
       return {
         sourceType: "order_source_check",
         legacySourceType: null,
         confidence: "medium",
         reason: `检测到 ${bestOrder.name} 包含订单来源核查字段。`,
+        candidates: ["order_source_check"],
+        v2Eligible: true,
+        lowConfidenceNotes: [],
+      };
+    }
+
+    if (bestOrderFallback?.matched >= 4 || (looksLikeOrderAuditFile && bestOrderFallback?.matched >= 3)) {
+      return {
+        sourceType: "order_source_check",
+        legacySourceType: null,
+        confidence: "medium",
+        reason: `检测到 ${bestOrderFallback.name} 包含订单号、下单时间、手机号和平台来源等订单来源核查字段。`,
         candidates: ["order_source_check"],
         v2Eligible: true,
         lowConfidenceNotes: [],
@@ -169,6 +203,7 @@ const inferLeadSheetBusinessType = (fileInfo: UploadedFileInfo) => {
 
   try {
     const sheets = readTabularSheets(fileInfo);
+    const joinedFileContext = [fileInfo.name || "", ...sheets.map((sheet) => sheet.name)].join(" ");
     const detection = detectLeadSheet(sheets);
     if (detection.kind !== "lead_detail_sheet") {
       return null;
@@ -206,6 +241,22 @@ const inferLeadSheetBusinessType = (fileInfo: UploadedFileInfo) => {
         sourceType: "flexible_subscription_followup" as const,
         confidence: "medium" as const,
         reason: "主线索表里以灵活订阅为主，但仍存在少量其他业务线。",
+      };
+    }
+
+    if (/超级/.test(joinedFileContext) && !/灵活/.test(joinedFileContext)) {
+      return {
+        sourceType: "super_subscription_followup" as const,
+        confidence: "medium" as const,
+        reason: "文件名或工作表名稳定指向超级订阅。",
+      };
+    }
+
+    if (/灵活/.test(joinedFileContext) && !/超级/.test(joinedFileContext)) {
+      return {
+        sourceType: "flexible_subscription_followup" as const,
+        confidence: "medium" as const,
+        reason: "文件名或工作表名稳定指向灵活订阅。",
       };
     }
   } catch {

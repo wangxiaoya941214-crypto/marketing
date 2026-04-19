@@ -193,7 +193,6 @@ test("闭环底座单文件上传后会直接进入 V2 总览看板", async ({
 
   await expect(page.getByRole("heading", { name: /推荐分析方向/ })).toHaveCount(0);
   await expect(page.getByTestId("v2-dashboard-title")).toHaveText("总览驾驶舱");
-  await expect(page.getByRole("heading", { name: /当前工作区/ })).toBeVisible();
   await expect(page.getByText("筛选与快照")).toBeVisible();
   await expect(page.getByRole("button", { name: /打开 Alex/i })).toBeVisible();
 

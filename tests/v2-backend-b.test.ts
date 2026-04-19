@@ -259,6 +259,25 @@ test("V2 六套 Agent 按固定角色绑定并支持 followup", async () => {
     assert.equal(followup.sessionId, first.sessionId);
     assert.equal(followup.agentName, "Alex");
     assert.ok(followup.content.length > 0);
+
+    const filtered = await analyzeV2Agent(snapshotId, "flexible_subscription", {
+      timeScope: "last_7_days",
+      businessFilter: "super",
+    });
+    assert.equal(filtered.agentName, "Iris");
+    assert.ok(filtered.content.length > 0);
+
+    const filteredFollowup = await followupV2Agent(
+      filtered.sessionId,
+      "继续按当前筛选解释风险。",
+      {
+        timeScope: "current_cycle",
+        businessFilter: "flexible",
+      },
+    );
+    assert.equal(filteredFollowup.sessionId, filtered.sessionId);
+    assert.equal(filteredFollowup.agentName, "Iris");
+    assert.ok(filteredFollowup.content.length > 0);
   });
 });
 

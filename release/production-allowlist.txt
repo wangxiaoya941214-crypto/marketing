@@ -36,6 +36,7 @@ docs/README.md
 docs/PM_项目交接说明.md
 docs/V2_闭环分析_测试清单.md
 docs/发版验收单.md
+docs/六大看板_Agent角色设定.md
 scripts/check-release-scope.mjs
 scripts/run-daily-browser-check.mjs
 release/production-allowlist.txt

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   BellRing,
@@ -12,6 +12,7 @@ import {
   Send,
 } from "lucide-react";
 import type {
+  V2AlertItem,
   V2DashboardBusinessFilter,
   V2DashboardFilterMeta,
   V2DashboardFilters,
@@ -19,6 +20,7 @@ import type {
   V2DashboardTimeScope,
   V2DashboardType,
   V2SnapshotRecord,
+  V2UploadSessionRecord,
 } from "../../shared/v2/types.ts";
 
 type AgentTimelineMessage = {
@@ -522,7 +524,7 @@ const DashboardView = ({
   if (!payload) {
     return (
       <div className={`${CARD_CLASS} px-8 py-10 text-sm font-medium text-gray-500`}>
-        {meta.emptyState} 先完成上传会话，或者切换到一个已有快照。
+        {meta.emptyState} 先回首页完成分析，或者切换到一个已有快照。
       </div>
     );
   }
@@ -667,12 +669,9 @@ const DashboardView = ({
       </section>
 
       {dashboard.notices.length > 0 && (
-        <section className={`${CARD_CLASS} px-8 py-8`}>
+        <section className={`${CARD_CLASS} px-8 py-6`}>
           <div className="space-y-3">
-            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-gray-400">
-              补充说明
-            </p>
-            {dashboard.notices.map((notice) => (
+            {dashboard.notices.slice(0, 1).map((notice) => (
               <div key={notice} className="rounded-[1.25rem] border border-gray-200 bg-gray-50 px-4 py-4 text-sm font-medium leading-7 text-gray-700">
                 {notice}
               </div>
@@ -773,6 +772,9 @@ export function V2Workspace({
   const [timeScope, setTimeScope] = useState<V2DashboardTimeScope>("current_snapshot");
   const [businessFilter, setBusinessFilter] = useState<V2DashboardBusinessFilter>("all");
   const [showAlertsPanel, setShowAlertsPanel] = useState(false);
+  const [alerts, setAlerts] = useState<V2AlertItem[]>([]);
+  const [alertsLoading, setAlertsLoading] = useState(false);
+  const [alertsErrorMessage, setAlertsErrorMessage] = useState("");
   const [dashboardPayload, setDashboardPayload] = useState<V2DashboardResponse | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [agentOpen, setAgentOpen] = useState(false);
@@ -795,7 +797,11 @@ export function V2Workspace({
     () => DASHBOARD_META.find((item) => item.type === activeDashboard) || DASHBOARD_META[0],
     [activeDashboard],
   );
-  const alertCount = activeSnapshot?.alerts.length || 0;
+  const effectiveTimeScope =
+    dashboardPayload?.appliedFilters.timeScope || timeScope;
+  const effectiveBusinessFilter =
+    dashboardPayload?.appliedFilters.businessFilter || businessFilter;
+  const alertCount = alerts.length || activeSnapshot?.alerts.length || 0;
 
   const resetAgent = () => {
     setAgentSessionId("");
@@ -809,16 +815,17 @@ export function V2Workspace({
   };
 
   const loadSnapshots = async (focusSnapshotId?: string) => {
-    const response = await fetch("/api/snapshot/list");
-    const payload = await response.json();
+    const { response, payload } = await fetchJsonWithTimeout("/api/snapshot/list");
     if (!response.ok) {
-      throw new Error(payload.error || "读取快照列表失败。");
+      throw new Error((payload as { error?: string } | null)?.error || "读取快照列表失败。");
     }
-    const nextSnapshots = (payload.snapshots || []) as V2SnapshotRecord[];
+    const nextSnapshots =
+      (((payload as { snapshots?: V2SnapshotRecord[] } | null)?.snapshots) || []) as V2SnapshotRecord[];
     setSnapshots(nextSnapshots);
     if (!nextSnapshots.length) {
       setSelectedSnapshotId("");
       setDashboardPayload(null);
+      setAlerts([]);
       return;
     }
     if (focusSnapshotId && nextSnapshots.some((item) => item.id === focusSnapshotId)) {
@@ -830,6 +837,28 @@ export function V2Workspace({
       !nextSnapshots.some((item) => item.id === selectedSnapshotId)
     ) {
       setSelectedSnapshotId(nextSnapshots[0].id);
+    }
+  };
+
+  const loadAlerts = async (snapshotId: string) => {
+    setAlertsLoading(true);
+    try {
+      const query = new URLSearchParams({ snapshotId });
+      const { response, payload } = await fetchJsonWithTimeout(
+        `/api/alert/list?${query.toString()}`,
+      );
+      if (!response.ok) {
+        throw new Error((payload as { error?: string } | null)?.error || "读取预警失败。");
+      }
+      setAlerts((((payload as { alerts?: V2AlertItem[] } | null)?.alerts) || []) as V2AlertItem[]);
+      setAlertsErrorMessage("");
+    } catch (error) {
+      setAlerts([]);
+      setAlertsErrorMessage(
+        toFriendlyWorkspaceErrorMessage(error, "读取预警失败，请稍后重试。"),
+      );
+    } finally {
+      setAlertsLoading(false);
     }
   };
 
@@ -856,10 +885,13 @@ export function V2Workspace({
         timeScope: filters.timeScope,
         businessFilter: filters.businessFilter,
       });
-      const response = await fetch(`${routeByDashboard[dashboardType]}?${query.toString()}`);
-      const payload = (await response.json()) as V2DashboardResponse | { error?: string };
-      if (!response.ok || !("dashboard" in payload)) {
-        throw new Error(("error" in payload && payload.error) || "读取看板失败。");
+      const { response, payload } = await fetchJsonWithTimeout(
+        `${routeByDashboard[dashboardType]}?${query.toString()}`,
+      );
+      if (!response.ok || !payload || !("dashboard" in payload)) {
+        throw new Error(
+          (payload && "error" in payload && payload.error) || "读取看板失败。",
+        );
       }
       setErrorMessage("");
       setDashboardPayload(payload);
@@ -900,8 +932,17 @@ export function V2Workspace({
   }, [selectedSnapshotId, activeDashboard, timeScope, businessFilter]);
 
   useEffect(() => {
+    if (!selectedSnapshotId) {
+      setAlerts([]);
+      setAlertsErrorMessage("");
+      return;
+    }
+    void loadAlerts(selectedSnapshotId);
+  }, [selectedSnapshotId]);
+
+  useEffect(() => {
     resetAgent();
-  }, [selectedSnapshotId, activeDashboard]);
+  }, [selectedSnapshotId, activeDashboard, timeScope, businessFilter]);
 
   useEffect(() => {
     if (!isFromHome || !initialSnapshot || !initialDashboard) {
@@ -938,30 +979,43 @@ export function V2Workspace({
     try {
       const controller = new AbortController();
       timeoutId = setTimeout(() => controller.abort(), 12000);
-      const response = await fetch("/api/agent/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          snapshotId: selectedSnapshotId,
-          dashboardType: activeDashboard,
-        }),
-        signal: controller.signal,
-      });
-      if (timeoutId) clearTimeout(timeoutId);
-      const payload = await response.json();
+      const { response, payload } = await fetchJsonWithTimeout(
+        "/api/agent/analyze",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            snapshotId: selectedSnapshotId,
+            dashboardType: activeDashboard,
+            timeScope: effectiveTimeScope,
+            businessFilter: effectiveBusinessFilter,
+          }),
+          signal: controller.signal,
+        },
+        12000,
+      );
       if (!response.ok) {
-        throw new Error(payload.error || "读取 Agent 分析失败。");
+        throw new Error((payload as { error?: string } | null)?.error || "读取 Agent 分析失败。");
       }
-      setAgentSessionId(payload.sessionId || "");
-      setAgentRoleLabel(payload.roleLabel || "");
+      const agentPayload = payload as {
+        sessionId?: string;
+        roleLabel?: string;
+        content?: string;
+        fallback?: boolean;
+      };
+      setAgentSessionId(agentPayload.sessionId || "");
+      setAgentRoleLabel(agentPayload.roleLabel || "");
       setAgentMessages(
-        payload.content
-          ? [{ role: "assistant", content: payload.content }]
+        agentPayload.content
+          ? [{ role: "assistant", content: agentPayload.content }]
           : [],
       );
-      setAgentFallback(Boolean(payload.fallback));
+      setAgentFallback(Boolean(agentPayload.fallback));
     } catch (error: any) {
-      if (error?.name === "AbortError") {
+      if (
+        error?.name === "AbortError" ||
+        (error instanceof Error && error.message.includes("请求超时"))
+      ) {
         setAgentTimedOut(true);
         return;
       }
@@ -984,28 +1038,40 @@ export function V2Workspace({
     try {
       const controller = new AbortController();
       timeoutId = setTimeout(() => controller.abort(), 12000);
-      const response = await fetch("/api/agent/followup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: agentSessionId,
-          userQuestion: question,
-        }),
-        signal: controller.signal,
-      });
-      if (timeoutId) clearTimeout(timeoutId);
-      const payload = await response.json();
+      const { response, payload } = await fetchJsonWithTimeout(
+        "/api/agent/followup",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId: agentSessionId,
+            userQuestion: question,
+            timeScope: effectiveTimeScope,
+            businessFilter: effectiveBusinessFilter,
+          }),
+          signal: controller.signal,
+        },
+        12000,
+      );
       if (!response.ok) {
-        throw new Error(payload.error || "追问失败。");
+        throw new Error((payload as { error?: string } | null)?.error || "追问失败。");
       }
+      const agentPayload = payload as {
+        content?: string;
+        roleLabel?: string;
+        fallback?: boolean;
+      };
       setAgentMessages((current) => [
         ...current,
-        { role: "assistant", content: payload.content || "" },
+        { role: "assistant", content: agentPayload.content || "" },
       ]);
-      setAgentRoleLabel(payload.roleLabel || agentRoleLabel);
-      setAgentFallback(Boolean(payload.fallback));
+      setAgentRoleLabel(agentPayload.roleLabel || agentRoleLabel);
+      setAgentFallback(Boolean(agentPayload.fallback));
     } catch (error: any) {
-      if (error?.name === "AbortError") {
+      if (
+        error?.name === "AbortError" ||
+        (error instanceof Error && error.message.includes("请求超时"))
+      ) {
         setAgentTimedOut(true);
         return;
       }
@@ -1101,39 +1167,24 @@ export function V2Workspace({
                   V2 WORKSPACE
                 </p>
                 <h1 className="text-5xl font-black tracking-tight text-gray-950">
-                  当前工作区
-                  <br />
-                  <span className="text-[#08E03B]">看板视图</span>
+                  {activeDashboardMeta.label}
                 </h1>
                 <p className="max-w-2xl text-sm font-medium leading-7 text-gray-600">
-                  上传、识别和开始分析已经接到首页，这里只负责快照切换、看板浏览和 Agent 分析。
+                  从首页进入后，这里只负责快照切换、看板浏览、预警查看和 Agent 分析。
                 </p>
               </div>
-              <div className="grid gap-4 sm:grid-cols-2 xl:min-w-[360px]">
-                <div className="rounded-[1.5rem] border border-gray-100 bg-gray-50 px-5 py-5">
-                  <p className="text-[10px] font-black uppercase tracking-[0.18em] text-gray-400">
-                    当前快照
-                  </p>
-                  <p className="mt-3 text-2xl font-black tracking-tight text-gray-950">
-                    {activeSnapshot ? "已加载" : "未选择"}
-                  </p>
-                  <p className="mt-2 text-sm font-medium leading-6 text-gray-500">
-                    {activeSnapshot
-                      ? `当前使用 ${activeDashboardMeta.label} 对应快照。`
-                      : "请先从首页完成上传识别，或者切到已有快照。"}
-                  </p>
-                </div>
-                <div className="rounded-[1.5rem] border border-gray-100 bg-gray-50 px-5 py-5">
-                  <p className="text-[10px] font-black uppercase tracking-[0.18em] text-gray-400">
-                    当前重点
-                  </p>
-                  <p className="mt-3 text-2xl font-black tracking-tight text-gray-950">
-                    {activeDashboardMeta.label}
-                  </p>
-                  <p className="mt-2 text-sm font-medium leading-6 text-gray-500">
-                    {activeDashboardMeta.atmosphere}
-                  </p>
-                </div>
+              <div className="rounded-[1.75rem] border border-gray-100 bg-gray-50 px-5 py-5 xl:min-w-[360px]">
+                <p className="text-[10px] font-black uppercase tracking-[0.18em] text-gray-400">
+                  首屏状态
+                </p>
+                <p className="mt-3 text-lg font-black tracking-tight text-gray-950">
+                  {activeSnapshot ? "已从首页进入当前看板" : "等待首页分析完成"}
+                </p>
+                <p className="mt-2 text-sm font-medium leading-6 text-gray-500">
+                  {activeSnapshot
+                    ? `${activeDashboardMeta.label} 已绑定当前快照，可直接浏览和追问 Agent。`
+                    : "请先回首页完成上传和分析。"}
+                </p>
               </div>
             </div>
 
@@ -1147,18 +1198,6 @@ export function V2Workspace({
               <span className="rounded-full border border-gray-200 bg-white px-4 py-2 text-[10px] font-black uppercase tracking-[0.16em] text-gray-600">
                 {snapshots.length > 0 ? `${snapshots.length} 个快照可切换` : "暂无可用快照"}
               </span>
-            </div>
-
-            <div className="mt-6 rounded-[1.75rem] border border-dashed border-gray-200 bg-gray-50 px-6 py-6">
-              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-gray-400">
-                入口说明
-              </p>
-              <p className="mt-3 text-xl font-black tracking-tight text-gray-950">
-                上传、识别和开始分析已经放到首页。
-              </p>
-              <p className="mt-2 max-w-2xl text-sm font-medium leading-7 text-gray-500">
-                当前页面只保留快照切换、看板浏览、预警查看和 Agent 分析，不再重复放上传与识别入口。
-              </p>
             </div>
           </section>
 
@@ -1199,6 +1238,7 @@ export function V2Workspace({
                   时间范围
                 </p>
                 <select
+                  data-testid="v2-time-scope-select"
                   value={timeScope}
                   onChange={(event) =>
                     setTimeScope(event.target.value as V2DashboardTimeScope)
@@ -1217,6 +1257,7 @@ export function V2Workspace({
                   业务线
                 </p>
                 <select
+                  data-testid="v2-business-filter-select"
                   value={businessFilter}
                   onChange={(event) =>
                     setBusinessFilter(
@@ -1238,6 +1279,7 @@ export function V2Workspace({
                 </p>
                 <div className="mt-3 flex gap-3">
                   <select
+                    data-testid="v2-snapshot-select"
                     value={selectedSnapshotId}
                     onChange={(event) => setSelectedSnapshotId(event.target.value)}
                     className="min-w-0 flex-1 bg-transparent text-sm font-black text-gray-950 outline-none"
@@ -1275,7 +1317,7 @@ export function V2Workspace({
           <section className={`${CARD_CLASS} px-8 py-6`}>
             <div className="flex flex-wrap items-center justify-between gap-4">
               <p className="text-sm font-medium leading-7 text-gray-500">
-                上传、识别和开始分析已经放到首页，这里只保留快照切换、看板浏览、预警和 Agent。
+                这里只保留看板、快照、预警和 Agent。
               </p>
             </div>
           </section>
@@ -1305,8 +1347,16 @@ export function V2Workspace({
 
             {showAlertsPanel && (
               <div data-testid="v2-alerts-panel" className="mt-6 grid gap-3 md:grid-cols-2">
-                {activeSnapshot && activeSnapshot.alerts.length > 0 ? (
-                  activeSnapshot.alerts.map((alert) => (
+                {alertsLoading ? (
+                  <div className="rounded-[1.25rem] border border-gray-200 bg-gray-50 px-4 py-4 text-sm font-medium text-gray-500">
+                    正在读取当前 snapshot 的预警结果...
+                  </div>
+                ) : alertsErrorMessage ? (
+                  <div className="rounded-[1.25rem] border border-red-200 bg-red-50 px-4 py-4 text-sm font-medium text-red-700">
+                    {alertsErrorMessage}
+                  </div>
+                ) : alerts.length > 0 ? (
+                  alerts.map((alert) => (
                     <div
                       key={`${alert.level}-${alert.title}`}
                       className={`rounded-[1.25rem] border px-4 py-4 text-sm font-medium ${toneClass(alert.level === "red" ? "danger" : "warning")}`}
@@ -1394,6 +1444,12 @@ export function V2Workspace({
               <span className="rounded-full border border-[#08E03B]/20 bg-[#08E03B]/10 px-4 py-2 text-[10px] font-black uppercase tracking-[0.16em] text-[#067b21]">
                 {activeDashboardMeta.label}
               </span>
+              <span className="rounded-full border border-gray-200 bg-white px-4 py-2 text-[10px] font-black uppercase tracking-[0.16em] text-gray-500">
+                {TIME_SCOPE_LABEL[effectiveTimeScope]}
+              </span>
+              <span className="rounded-full border border-gray-200 bg-white px-4 py-2 text-[10px] font-black uppercase tracking-[0.16em] text-gray-500">
+                {BUSINESS_FILTER_LABEL[effectiveBusinessFilter]}
+              </span>
               <span
                 className={`rounded-full border px-4 py-2 text-[10px] font-black uppercase tracking-[0.16em] ${
                   agentLoading
@@ -1454,7 +1510,7 @@ export function V2Workspace({
 
             {agentEmptyContext && !agentLoading && (
               <div className="mt-4 rounded-[1.25rem] border border-gray-200 bg-gray-50 px-4 py-4 text-sm font-medium leading-6 text-gray-600">
-                当前看板上下文还不完整，Agent 暂时没有足够信息开始分析。请先完成上传、识别确认或切到已有快照。
+                当前看板上下文还不完整，Agent 暂时没有足够信息开始分析。请先回首页完成分析，或切到已有快照。
               </div>
             )}
 

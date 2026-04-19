@@ -75,6 +75,7 @@ class MemoryV2Store implements V2Store {
         legacySourceType: null,
         sourceType: null,
         manualSourceType: null,
+        manualOverrideApplied: false,
         confidence: "low",
         reason: "等待识别。",
         candidates: [],
@@ -186,6 +187,7 @@ class PostgresV2Store implements V2Store {
       legacy_source_type text,
       source_type text,
       manual_source_type text,
+      manual_override_applied boolean not null default false,
       confidence text not null,
       reason text not null,
       v2_eligible boolean not null,
@@ -217,6 +219,8 @@ class PostgresV2Store implements V2Store {
       add column if not exists canonical_facts_json jsonb not null default '{}'::jsonb;
     alter table v2_snapshots
       add column if not exists agent_contexts_json jsonb not null default '{}'::jsonb;
+    alter table v2_upload_files
+      add column if not exists manual_override_applied boolean not null default false;
     create table if not exists v2_agent_threads (
       id text primary key,
       dashboard_type text not null,
@@ -279,6 +283,7 @@ class PostgresV2Store implements V2Store {
         legacySourceType: null,
         sourceType: null,
         manualSourceType: null,
+        manualOverrideApplied: false,
         confidence: "low",
         reason: "等待识别。",
         candidates: [],
@@ -339,6 +344,7 @@ class PostgresV2Store implements V2Store {
             legacy_source_type,
             source_type,
             manual_source_type,
+            manual_override_applied,
             confidence,
             reason,
             v2_eligible,
@@ -355,6 +361,7 @@ class PostgresV2Store implements V2Store {
             ${file.legacySourceType},
             ${file.sourceType},
             ${file.manualSourceType},
+            ${file.manualOverrideApplied},
             ${file.confidence},
             ${file.reason},
             ${file.v2Eligible},
@@ -536,6 +543,7 @@ const mapUploadFileRow = (row: PostgresRow): V2UploadFileRecord => ({
   legacySourceType: (row.legacy_source_type as V2UploadFileRecord["legacySourceType"]) || null,
   sourceType: (row.source_type as V2UploadFileRecord["sourceType"]) || null,
   manualSourceType: (row.manual_source_type as V2UploadFileRecord["manualSourceType"]) || null,
+  manualOverrideApplied: Boolean(row.manual_override_applied),
   confidence: row.confidence as V2UploadFileRecord["confidence"],
   reason: String(row.reason),
   v2Eligible: Boolean(row.v2_eligible),

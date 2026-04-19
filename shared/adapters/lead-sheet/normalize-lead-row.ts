@@ -29,6 +29,7 @@ export interface NormalizedLeadRow {
   channelGroup: string;
   businessTypeRaw: string;
   businessType: LeadProduct;
+  city: string;
   leadName: string;
   phone: string;
   salesOwner: string;
@@ -103,10 +104,15 @@ const parseCount = (value: string) => {
 const normalizeBusinessType = (value: string): LeadProduct => {
   const raw = normalizeCell(value);
   if (!raw) return "unknown";
+  if (/flexible/i.test(raw)) return "flexible";
+  if (/super/i.test(raw)) return "super";
   if (/灵活/.test(raw)) return "flexible";
   if (/超级/.test(raw)) return "super";
   return "unknown";
 };
+
+const inferBusinessTypeFromSheetName = (sheetName: string): LeadProduct =>
+  normalizeBusinessType(sheetName);
 
 const toNormalizedRawRow = (rawRow: Record<string, string>) =>
   Object.fromEntries(
@@ -257,17 +263,28 @@ const buildRawRow = (header: string[], row: string[]) => {
 };
 
 const classifyChannelGroup = (channel: string, channelDetail: string) => {
-  const joined = `${channel} ${channelDetail}`;
-  if (/抖音|douyin/i.test(joined)) {
-    return "抖音-品牌号";
-  }
-  if (/小红书|xhs|red/i.test(joined)) {
-    return "小红书-品牌号";
-  }
-  if (/私域|老客|老客户|复购|转介绍|微信|企微/i.test(joined)) {
+  const joined = `${channel} ${channelDetail}`.trim();
+  const isPrivateDomain = /私域|老客|老客户|复购|转介绍|微信|企微/i.test(joined);
+  if (isPrivateDomain) {
     return "私域-老客户";
   }
-  return "其他 / 待确认";
+
+  const isIpAccount = /老孙|IP/i.test(joined);
+  const isDouyin = /抖音|douyin/i.test(joined);
+  const isXhs = /小红书|xhs|red/i.test(joined);
+  const isVideo = /视频号|微信视频号/i.test(joined);
+
+  if (isDouyin) {
+    return isIpAccount ? "抖音-IP号" : "抖音-品牌号";
+  }
+  if (isXhs) {
+    return isIpAccount ? "小红书-IP号" : "小红书-品牌号";
+  }
+  if (isVideo) {
+    return isIpAccount ? "视频号-IP号" : "视频号-品牌号";
+  }
+
+  return isIpAccount ? "其他-IP号" : "其他 / 待确认";
 };
 
 const isMeaningfulDataRow = (
@@ -377,7 +394,13 @@ export const normalizeLeadRows = (
     const businessTypeRaw =
       normalizeCell(
         normalizedRow[activeDetection.columnMap.businessType ?? -1],
-      ) || "";
+      ) ||
+      inferBusinessTypeFromSheetName(activeDetection.sheetName) ||
+      "";
+    const city = getFirstNonEmptyValue(
+      normalizeCell(normalizedRow[activeDetection.columnMap.city ?? -1]),
+      getRawValue(normalizedRawRow, ["用车城市", "城市", "地区"]),
+    );
     const leadName =
       getFirstNonEmptyValue(
         normalizeCell(normalizedRow[activeDetection.columnMap.leadName ?? -1]),
@@ -396,7 +419,7 @@ export const normalizeLeadRows = (
     const addedWechatRaw =
       getFirstNonEmptyValue(
         normalizeCell(normalizedRow[activeDetection.columnMap.addedWechat ?? -1]),
-        getRawValue(normalizedRawRow, ["是否成功加微", "是否成功加微信", "是否加微"]),
+        getRawValue(normalizedRawRow, ["是否成功加微", "是否成功加微信", "是否添加成功微信", "是否加微"]),
       );
     const highIntentRaw =
       getFirstNonEmptyValue(
@@ -480,6 +503,7 @@ export const normalizeLeadRows = (
       channelGroup: classifyChannelGroup(channel, channelDetail),
       businessTypeRaw,
       businessType: normalizeBusinessType(businessTypeRaw),
+      city,
       leadName,
       phone,
       salesOwner,

@@ -1,5 +1,9 @@
 import { analyzeV2Agent, followupV2Agent } from "../_lib/v2-agent-service.ts";
-import type { V2DashboardType } from "../../shared/v2/types.ts";
+import type {
+  V2DashboardBusinessFilter,
+  V2DashboardTimeScope,
+  V2DashboardType,
+} from "../../shared/v2/types.ts";
 
 const parseBody = (request: { body?: unknown }) => {
   if (typeof request.body === "string") {
@@ -25,12 +29,19 @@ export default async function handler(request: any, response: any) {
       const body = parseBody(request) as {
         snapshotId?: string;
         dashboardType?: V2DashboardType;
+        timeScope?: V2DashboardTimeScope;
+        businessFilter?: V2DashboardBusinessFilter;
       };
       if (!body.snapshotId || !body.dashboardType) {
         response.status(400).json({ error: "缺少 snapshotId 或 dashboardType。" });
         return;
       }
-      response.status(200).json(await analyzeV2Agent(body.snapshotId, body.dashboardType));
+      response.status(200).json(
+        await analyzeV2Agent(body.snapshotId, body.dashboardType, {
+          timeScope: body.timeScope,
+          businessFilter: body.businessFilter,
+        }),
+      );
       return;
     }
 
@@ -43,13 +54,18 @@ export default async function handler(request: any, response: any) {
       const body = parseBody(request) as {
         sessionId?: string;
         userQuestion?: string;
+        timeScope?: V2DashboardTimeScope;
+        businessFilter?: V2DashboardBusinessFilter;
       };
       if (!body.sessionId || !body.userQuestion?.trim()) {
         response.status(400).json({ error: "缺少 sessionId 或追问内容。" });
         return;
       }
       response.status(200).json(
-        await followupV2Agent(body.sessionId, body.userQuestion.trim()),
+        await followupV2Agent(body.sessionId, body.userQuestion.trim(), {
+          timeScope: body.timeScope,
+          businessFilter: body.businessFilter,
+        }),
       );
       return;
     }

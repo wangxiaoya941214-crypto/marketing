@@ -95,6 +95,12 @@ const normalizeBusinessLine = (value: string): V2BusinessLine => {
   return "unknown";
 };
 
+const inferBusinessLineFromFileName = (fileName: string): V2BusinessLine => {
+  if (/超级/.test(fileName)) return "super";
+  if (/灵活/.test(fileName)) return "flexible";
+  return "unknown";
+};
+
 const inferAttribution = (input: {
   creativeId?: string;
   noteId?: string;
@@ -346,7 +352,7 @@ const parseFollowupFacts = (file: V2UploadFileRecord, sourceType: V2SourceType) 
       leadKind: "followup",
       businessLine: businessLine === "unknown" ? row.businessType : businessLine,
       phone: row.phone,
-      city: normalizeCity(row.channelDetail || row.channelGroup),
+      city: normalizeCity(row.city || row.channelDetail || row.channelGroup),
       leadDate: normalizeDate(row.leadDate),
       channel: inferChannel(row.channel, row.channelDetail),
       accountType: inferAccountType(row.channel, row.channelDetail),
@@ -369,7 +375,7 @@ const parseFollowupFacts = (file: V2UploadFileRecord, sourceType: V2SourceType) 
         sourceFileName: file.name,
         businessLine: businessLine === "unknown" ? row.businessType : businessLine,
         phone: row.phone,
-        city: normalizeCity(row.channelDetail || row.channelGroup),
+        city: normalizeCity(row.city || row.channelDetail || row.channelGroup),
         orderDate: normalizeDate(row.orderDate || row.dealDate),
         orderSource: inferChannel(row.channel, row.channelDetail),
       }),
@@ -480,14 +486,19 @@ const parseOrderFacts = (file: V2UploadFileRecord) => {
       id: `${file.id}-order-${index + 1}`,
       sourceType: "order_source_check",
       sourceFileName: file.name,
-      businessLine: normalizeBusinessLine(
-        normalizeCell(row["业务线"] || row["业务类型"] || row["产品"]),
-      ),
+      businessLine:
+        normalizeBusinessLine(
+          normalizeCell(row["业务线"] || row["业务类型"] || row["产品"]),
+        ) !== "unknown"
+          ? normalizeBusinessLine(
+              normalizeCell(row["业务线"] || row["业务类型"] || row["产品"]),
+            )
+          : inferBusinessLineFromFileName(file.name),
       phone: normalizeCell(row["手机号"] || row["联络主键"] || row["手机号码"]),
-      city: normalizeCity(normalizeCell(row["城市"] || row["地区"])),
+      city: normalizeCity(normalizeCell(row["城市"] || row["地区"] || row["用车城市"])),
       orderDate: normalizeDate(normalizeCell(row["下单时间"] || row["日期"])),
       orderSource: normalizeCell(
-        row["订单来源"] || row["归因渠道"] || row["来源核查"],
+        row["订单来源"] || row["归因渠道"] || row["来源核查"] || row["平台来源"] || row["备注"],
       ),
     }),
   );

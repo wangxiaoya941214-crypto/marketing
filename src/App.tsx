@@ -419,6 +419,24 @@ const fileToBase64 = (file: File) =>
     reader.readAsDataURL(file);
   });
 
+const toFriendlyRequestErrorMessage = (
+  error: unknown,
+  fallback = "请求失败，请稍后重试。",
+) => {
+  const message =
+    error instanceof Error ? error.message.trim() : typeof error === "string" ? error.trim() : "";
+
+  if (!message) {
+    return fallback;
+  }
+
+  if (message === "Failed to fetch" || /NetworkError|Load failed|fetch/i.test(message)) {
+    return "网络请求失败，请确认服务已启动后重试。";
+  }
+
+  return message;
+};
+
 const Card = ({
   children,
   className = "",
@@ -946,8 +964,7 @@ function LegacyApp({
     }
 
     onEnterV2({
-      initialDashboard:
-        buildPayload.entryDashboard || analyzePayload.entryDashboard,
+      initialDashboard: buildPayload.entryDashboard,
       initialSnapshot: buildPayload.snapshot,
       initialUploadSession: buildPayload.upload,
     });
@@ -1009,11 +1026,11 @@ function LegacyApp({
         current.map((item) => ({
           ...item,
           status: "error",
-          statusHint: error.message || "分流失败。",
+          statusHint: toFriendlyRequestErrorMessage(error, "分流失败。"),
           v2Eligible: item.v2Eligible,
         })),
       );
-      setErrorMessage(error.message || "分流失败");
+      setErrorMessage(toFriendlyRequestErrorMessage(error, "分流失败。"));
     } finally {
       setRoutingLoading(false);
     }
@@ -1063,7 +1080,7 @@ function LegacyApp({
     } catch (error: any) {
       setLeadImportAudit(null);
       setRecognitionAudit(null);
-      setErrorMessage(error.message || "识别失败");
+      setErrorMessage(toFriendlyRequestErrorMessage(error, "识别失败。"));
     } finally {
       setRecognizing(false);
     }
@@ -1273,8 +1290,6 @@ function LegacyApp({
         </div>
         <div className="hidden md:flex items-center gap-10 text-[11px] font-black tracking-widest uppercase text-gray-400">
           <span className="text-black">统一上传</span>
-          <span>后台识别</span>
-          <span>对应分析页</span>
         </div>
         <div className="flex items-center gap-2 rounded-full border border-gray-100 bg-gray-50 px-4 py-2">
           <div className="w-2 h-2 bg-[#08E03B] rounded-full animate-pulse shadow-[0_0_8px_#08E03B]" />
@@ -1322,14 +1337,16 @@ function LegacyApp({
             >
               <Card className={`p-7 sm:p-8 xl:p-9 border-2 transition-all duration-500 ${isDragging ? "border-[#08E03B] bg-[#08E03B]/5 scale-[0.995]" : "border-black bg-white hover:shadow-2xl"}`}>
                 <div className="flex flex-col items-center text-center space-y-6">
-                  <div className="flex w-full flex-wrap items-center justify-center gap-3">
-                    <span className="rounded-full border border-black bg-black px-4 py-2 text-[10px] font-black uppercase tracking-[0.16em] text-[#08E03B]">
-                      统一上传
-                    </span>
-                    <span className={`rounded-full border px-4 py-2 text-[10px] font-black uppercase tracking-[0.16em] ${uploadState.className}`}>
-                      {uploadState.label}
-                    </span>
-                  </div>
+                  {hasUploadContent && (
+                    <div className="flex w-full flex-wrap items-center justify-center gap-3">
+                      <span className="rounded-full border border-black bg-black px-4 py-2 text-[10px] font-black uppercase tracking-[0.16em] text-[#08E03B]">
+                        统一上传
+                      </span>
+                      <span className={`rounded-full border px-4 py-2 text-[10px] font-black uppercase tracking-[0.16em] ${uploadState.className}`}>
+                        {uploadState.label}
+                      </span>
+                    </div>
+                  )}
 
                   <div className={`w-16 h-16 sm:w-20 sm:h-20 flex items-center justify-center transition-all duration-500 ${isDragging ? "rotate-[360deg] scale-125" : ""}`}>
                     <svg width="64" height="64" viewBox="0 0 80 80" fill="none">
@@ -1342,33 +1359,8 @@ function LegacyApp({
                       {isDragging ? "立即释放文件开始识别" : "统一上传"}
                     </h3>
                     <p className="text-sm font-medium leading-6 text-gray-500">
-                      一次上传，系统会自动识别并优先尝试进入对应 V2 看板。
+                      上传后开始识别。
                     </p>
-                  </div>
-
-                  <div className="grid w-full grid-cols-1 gap-3 sm:grid-cols-2">
-                    <div className="rounded-[1.5rem] border border-gray-100 bg-gray-50 px-5 py-5 text-left">
-                      <p className="text-[10px] font-black uppercase tracking-[0.18em] text-gray-400">
-                        当前状态
-                      </p>
-                      <p className="mt-3 text-base font-black text-gray-950">
-                        {uploadState.label}
-                      </p>
-                      <p className="mt-2 text-sm font-medium leading-6 text-gray-500">
-                        {uploadState.hint}
-                      </p>
-                    </div>
-                    <div className="rounded-[1.5rem] border border-gray-100 bg-gray-50 px-5 py-5 text-left">
-                      <p className="text-[10px] font-black uppercase tracking-[0.18em] text-gray-400">
-                        系统动作
-                      </p>
-                      <p className="mt-3 text-base font-black text-gray-950">
-                        后台识别 + 进入分析页
-                      </p>
-                      <p className="mt-2 text-sm font-medium leading-6 text-gray-500">
-                        V2 文件会直接进入对应看板；单文件或文本会进入对应兼容诊断的数据校对页。
-                      </p>
-                    </div>
                   </div>
 
                   <div className="w-full relative">
@@ -1382,19 +1374,6 @@ function LegacyApp({
                       }}
                       placeholder="也可以直接在这里粘贴原始数据、复盘文档或表格内容..."
                     />
-                    {!hasUploadContent && !isDragging && (
-                      <div className="pointer-events-none absolute inset-x-5 bottom-5 rounded-[1.25rem] border border-dashed border-gray-200 bg-white/95 px-4 py-4 text-left">
-                        <p className="text-[10px] font-black uppercase tracking-[0.18em] text-gray-400">
-                          空态提示
-                        </p>
-                        <p className="mt-2 text-sm font-bold text-gray-700">
-                          还没有上传任何内容。
-                        </p>
-                        <p className="mt-1 text-sm font-medium leading-6 text-gray-500">
-                          支持一次拖入多份文件。系统会在后台完成识别和分析，再直接进入对应看板。
-                        </p>
-                      </div>
-                    )}
                     {isDragging && (
                       <div className="absolute inset-0 bg-[#08E03B]/10 rounded-3xl z-20 backdrop-blur-[2px] flex items-center justify-center border-2 border-dashed border-[#08E03B]">
                         <span className="text-black font-black text-xl italic uppercase tracking-widest animate-pulse">释放以上传数据</span>
@@ -1524,11 +1503,6 @@ function LegacyApp({
                     </div>
                   )}
 
-                  {!hasUploadContent && !errorMessage && (
-                    <p className="text-xs font-medium leading-6 text-gray-400">
-                      默认入口只负责上传、识别和直达看板，不再给用户暴露旧入口切换。
-                    </p>
-                  )}
                 </div>
               </Card>
             </div>

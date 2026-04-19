@@ -327,6 +327,34 @@ const createDashboardQueryError = (message: string) => {
   return error;
 };
 
+const resolveEffectiveSourceType = (
+  file: Pick<V2UploadFileRecord, "manualOverrideApplied" | "manualSourceType" | "sourceType">,
+) => (file.manualOverrideApplied ? file.manualSourceType : file.sourceType);
+
+const normalizeUploadInputFiles = (files: UploadedFileInfo[]) => {
+  if (!Array.isArray(files) || files.length === 0) {
+    throw createDashboardQueryError("至少上传一个文件。");
+  }
+
+  return files.map((file) => {
+    const name = file.name?.trim() || "unnamed-file";
+    const mimeType = file.mimeType?.trim() || "application/octet-stream";
+    const data = String(file.data || "");
+    const size = Buffer.from(data, "base64").byteLength;
+
+    if (!data || size <= 0) {
+      throw createDashboardQueryError(`文件 ${name} 为空，无法创建上传会话。`);
+    }
+
+    return {
+      name,
+      mimeType,
+      size,
+      data,
+    };
+  });
+};
+
 const validateTimeScope = (
   timeScope: string | undefined,
 ): V2DashboardTimeScope => {
@@ -908,7 +936,7 @@ const buildSourceCoverage = (files: V2UploadFileRecord[]) => {
   ) as Record<V2SourceType, { fileCount: number; names: string[] }>;
 
   files.forEach((file) => {
-    const sourceType = file.manualSourceType || file.sourceType;
+    const sourceType = resolveEffectiveSourceType(file);
     if (!sourceType) return;
     coverage[sourceType].fileCount += 1;
     coverage[sourceType].names.push(file.name);
@@ -1028,8 +1056,8 @@ const resolveV2EntryFromUpload = (
 ): V2EntryResolution =>
   resolveV2EntryFromSources(
     upload.files
-      .filter((file) => file.v2Eligible && (file.manualSourceType || file.sourceType))
-      .map((file) => (file.manualSourceType || file.sourceType) as V2SourceType),
+      .filter((file) => file.v2Eligible && resolveEffectiveSourceType(file))
+      .map((file) => resolveEffectiveSourceType(file) as V2SourceType),
   );
 
 const resolveV2EntryFromConfirmedFiles = (
@@ -1703,14 +1731,7 @@ const buildArtifacts = async (files: V2UploadFileRecord[]): Promise<DashboardArt
 };
 
 export const uploadV2Files = async (files: UploadedFileInfo[]) =>
-  createUploadSessionRecord(
-    files.map((file) => ({
-      name: file.name?.trim() || "unnamed-file",
-      mimeType: file.mimeType?.trim() || "application/octet-stream",
-      size: Buffer.from(file.data || "", "base64").byteLength,
-      data: file.data || "",
-    })),
-  );
+  createUploadSessionRecord(normalizeUploadInputFiles(files));
 
 export const buildV2UploadResponse = (
   upload: V2UploadSessionRecord,
@@ -1741,6 +1762,17 @@ export const analyzeV2UploadSession = async (uploadId: string) => {
         mimeType: file.mimeType,
         data: file.data,
       });
+      if (file.manualOverrideApplied) {
+        return {
+          ...file,
+          status: "confirmed" as const,
+          legacySourceType: match.legacySourceType,
+          sourceType: match.sourceType,
+          confidence: match.confidence,
+          candidates: match.candidates,
+          lowConfidenceNotes: match.lowConfidenceNotes,
+        };
+      }
       return {
         ...file,
         status: "analyzed" as const,
@@ -1780,7 +1812,7 @@ export const buildV2AnalyzeResponse = (
     files: upload.files.map((file) => ({
       id: file.id,
       name: file.name,
-      sourceType: file.manualSourceType || file.sourceType,
+      sourceType: resolveEffectiveSourceType(file),
       confidence: file.confidence,
       reason: file.reason,
       v2Eligible: file.v2Eligible,
@@ -1803,11 +1835,23 @@ export const reclassifyV2UploadFile = async (
     throw error;
   }
 
+  if (sourceType !== null && !V2_SOURCE_TYPES.includes(sourceType)) {
+    throw createDashboardQueryError("sourceType 不合法。");
+  }
+
+  const targetFile = upload.files.find((file) => file.id === fileId);
+  if (!targetFile) {
+    const error = new Error("未找到要修正的文件。") as Error & { statusCode?: number };
+    error.statusCode = 404;
+    throw error;
+  }
+
   const nextFiles = upload.files.map((file) => {
     if (file.id !== fileId) return file;
     return {
       ...file,
       manualSourceType: sourceType,
+      manualOverrideApplied: true,
       status: "confirmed" as const,
       v2Eligible: sourceType !== null,
       reason:
@@ -1846,7 +1890,7 @@ export const buildV2AnalysisSession = async (uploadId: string) => {
   }
 
   const confirmedFiles = upload.files.filter(
-    (file) => file.v2Eligible && (file.manualSourceType || file.sourceType),
+    (file) => file.v2Eligible && resolveEffectiveSourceType(file),
   );
   if (!confirmedFiles.length) {
     const error = new Error(
@@ -1926,7 +1970,7 @@ export const buildV2AnalysisSession = async (uploadId: string) => {
     confirmedFiles: confirmedFiles.map((file) => ({
       id: file.id,
       name: file.name,
-      sourceType: (file.manualSourceType || file.sourceType)!,
+      sourceType: resolveEffectiveSourceType(file)!,
     })),
     legacyFiles: upload.files
       .filter((file) => !file.v2Eligible || !(file.manualSourceType || file.sourceType))
@@ -1948,14 +1992,15 @@ export const buildV2AnalysisSession = async (uploadId: string) => {
 
   await saveAnalysisSessionRecord(session);
   await saveSnapshotRecord(snapshot);
-  await saveUploadSessionRecord({
+  const nextUpload: V2UploadSessionRecord = {
     ...upload,
     status: "built",
     updatedAt: nowIso(),
-  });
+  };
+  await saveUploadSessionRecord(nextUpload);
 
   return {
-    upload,
+    upload: nextUpload,
     session,
     snapshot,
   };
@@ -1967,12 +2012,16 @@ export const buildV2BuildSessionResponse = (input: {
   snapshot: V2SnapshotRecord;
 }): V2BuildSessionResponse => {
   const entry = resolveV2EntryFromConfirmedFiles(input.snapshot.confirmedFiles);
+  const entryDashboard = entry.entryDashboard || "overview";
+  const entryReason =
+    entry.entryReason ||
+    `当前构建成功，默认进入${ENTRY_DASHBOARD_LABEL[entryDashboard]}。`;
 
   return {
     uploadId: input.upload.id,
     v2Eligible: entry.v2Eligible,
-    entryDashboard: entry.entryDashboard,
-    entryReason: entry.entryReason,
+    entryDashboard,
+    entryReason,
     sessionId: input.session.id,
     snapshotId: input.snapshot.id,
     v2Files: input.snapshot.confirmedFiles,

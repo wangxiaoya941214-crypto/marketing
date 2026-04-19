@@ -7,8 +7,15 @@ import {
 } from "../../shared/v2/store.ts";
 import { getV2Dashboard } from "../../shared/v2/service.ts";
 import type {
+  V2DashboardBusinessFilter,
+  V2DashboardTimeScope,
   V2DashboardType,
 } from "../../shared/v2/types.ts";
+
+type AgentFilterContext = {
+  timeScope?: V2DashboardTimeScope;
+  businessFilter?: V2DashboardBusinessFilter;
+};
 
 const readEnv = (value?: string) => value?.trim() || undefined;
 
@@ -71,8 +78,9 @@ const buildFallbackAnswer = (
 export const analyzeV2Agent = async (
   snapshotId: string,
   dashboardType: V2DashboardType,
+  filters: AgentFilterContext = {},
 ) => {
-  const { dashboard } = await getV2Dashboard(snapshotId, dashboardType);
+  const { dashboard } = await getV2Dashboard(snapshotId, dashboardType, filters);
   const promptMeta = getV2AgentPrompt(dashboardType);
   const systemPrompt = renderPrompt(promptMeta.prompt, dashboard.agentContext);
   const client = shouldForceFallback() ? null : getOpenAiClient();
@@ -140,7 +148,11 @@ export const analyzeV2Agent = async (
   };
 };
 
-export const followupV2Agent = async (threadId: string, userQuestion: string) => {
+export const followupV2Agent = async (
+  threadId: string,
+  userQuestion: string,
+  filters: AgentFilterContext = {},
+) => {
   const thread = await getAgentThread(threadId);
   if (!thread) {
     const error = new Error("未找到 Agent 会话。") as Error & { statusCode?: number };
@@ -148,7 +160,11 @@ export const followupV2Agent = async (threadId: string, userQuestion: string) =>
     throw error;
   }
 
-  const { dashboard } = await getV2Dashboard(thread.snapshotId, thread.dashboardType);
+  const { dashboard } = await getV2Dashboard(
+    thread.snapshotId,
+    thread.dashboardType,
+    filters,
+  );
   const promptMeta = getV2AgentPrompt(thread.dashboardType);
   const systemPrompt = renderPrompt(promptMeta.prompt, dashboard.agentContext);
   const client = shouldForceFallback() ? null : getOpenAiClient();

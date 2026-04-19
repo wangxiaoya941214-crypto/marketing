@@ -77,7 +77,7 @@ const FIELD_ALIASES = {
   conversionType: ["转化方式"],
   xhsPhone: ["手机号"],
   xhsWechat: ["微信号"],
-  contactKey: ["联络主键"],
+  contactKey: ["联络主键", "手机号_key", "微信号_key"],
   region: ["地区"],
   matchKey: ["匹配主键", "联络主键"],
   matchDaysDelta: ["匹配时间差_天", "匹配时间差天"],

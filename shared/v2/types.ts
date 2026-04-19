@@ -43,6 +43,7 @@ export type V2UploadFileRecord = {
   legacySourceType: LegacySourceType | null;
   sourceType: V2SourceType | null;
   manualSourceType: V2SourceType | null;
+  manualOverrideApplied: boolean;
   confidence: V2Confidence;
   reason: string;
   candidates: V2SourceType[];
@@ -283,8 +284,8 @@ export type V2AnalysisSessionRecord = {
 export type V2BuildSessionResponse = {
   uploadId: string;
   v2Eligible: boolean;
-  entryDashboard?: V2DashboardType;
-  entryReason?: string;
+  entryDashboard: V2DashboardType;
+  entryReason: string;
   sessionId: string;
   snapshotId: string;
   v2Files: Array<{
